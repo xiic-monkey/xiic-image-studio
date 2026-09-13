@@ -1,0 +1,31 @@
+# 依赖
+node_modules/
+
+# Rust / Tauri 构建产物
+src-tauri/target/
+src-tauri/gen/
+
+# 前端构建产物
+dist/
+
+# 本地数据库与生成的图片（含用户配置的 API 数据，绝不能入库）
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# 环境变量与密钥
+.env
+.env.*
+*.key
+*.pem
+
+# 本机 WorkBuddy 工作记忆（含本机绝对路径与个人偏好）
+.workbuddy/
+
+# 系统与编辑器
+.DS_Store
+.idea/
+.vscode/
+*.log

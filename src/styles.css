@@ -1,0 +1,65 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: light dark;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  /* 窗口已 opaque（transparent 关闭）。此处底色决定 webview 待加载时的底色，
+     也决定 hiddenTitle 透明标题栏透出的颜色——所以必须与 app 主色保持一致（白），
+     否则标题栏会发黑。dev 首屏白屏是 WKWebView 固有特性，release 预编译后无此期。 */
+  background: #ffffff;
+  font-family: -apple-system, "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+input, select, textarea, button {
+  outline: none;
+}
+
+/* 统一 select 外观：去掉 macOS 原生下拉框样式，换成自定义箭头，与其它表单控件保持一致 */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23737373' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.65em center;
+  background-size: 0.9em 0.9em;
+  /* 覆盖 Tailwind 的 px-*，给箭头预留空间，避免文字与箭头重叠 */
+  padding-right: 2.1em !important;
+  cursor: pointer;
+}
+
+/* ===== 下拉菜单自绘（替换 <select>）使用说明 =====
+   <Select /> 组件挂载面板时使用 .select-menu。
+   覆盖默认滚动条，跟整窗外观保持一致。 */
+.select-menu {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.18) transparent;
+}
+.select-menu::-webkit-scrollbar { width: 8px; height: 8px; }
+.select-menu::-webkit-scrollbar-track { background: transparent; }
+.select-menu::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.18);
+  border-radius: 4px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.select-menu::-webkit-scrollbar-thumb:hover { background-color: rgba(0, 0, 0, 0.32); }
+@media (prefers-color-scheme: dark) {
+  .select-menu { scrollbar-color: rgba(255, 255, 255, 0.18) transparent; }
+  .select-menu::-webkit-scrollbar-thumb { background-color: rgba(255, 255, 255, 0.18); }
+  .select-menu::-webkit-scrollbar-thumb:hover { background-color: rgba(255, 255, 255, 0.32); }
+}
+
+/* 隐藏横向滚动条（会话 tab 条等场景） */
+.no-scrollbar { scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+
+@media (prefers-color-scheme: dark) {
+  select {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23a3a3a3' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  }
+}
