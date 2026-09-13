@@ -29,3 +29,7 @@ dist/
 .idea/
 .vscode/
 *.log
+
+# ffmpeg sidecar：43MB 平台专属二进制，托管在 GitHub Releases（tag ffmpeg-v1），
+# 由 scripts/fetch-ffmpeg.sh 在打包 .app 前按需拉取，不进 git
+src-tauri/binaries/ffmpeg*
