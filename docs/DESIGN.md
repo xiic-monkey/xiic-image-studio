@@ -138,6 +138,6 @@ xiic-image-studio/
 
 - **Tauri 2 而非 Electron**：体积/内存优势 10 倍级，且团队有成熟经验
 - **协议适配器模式**：新增中转形态 = 加一个 adapter，不动 UI
-- **Key 走系统钥匙串**：不进 SQLite 明文
+- **Key 本地加密存储（非 Keychain）**：AES-256-GCM + 机器绑定(IOPlatformUUID)做混淆级保护，不进 SQLite 明文；dev 裸 binary 签名会变，用 Keychain 会反复弹授权框
 - **图片落盘 + 元数据进库**：库坏了好恢复，目录可以直接当相册用
 - **ffmpeg 做 sidecar 而非编译进 Rust**：升级独立、体积可控
