@@ -44,6 +44,7 @@ export const api = {
   toolsVideoFrames: (video: string, intervalSec?: number, maxFrames?: number, maxSide?: number) =>
     invoke<string[]>("tools_video_frames", { video, intervalSec: intervalSec ?? null, maxFrames: maxFrames ?? null, maxSide: maxSide ?? null }),
   toolsFileB64: (path: string) => invoke<string>("tools_file_b64", { path }),
+  readTextFile: (path: string) => invoke<string>("read_text_file", { path }),
 };
 
 export function onTaskProgress(cb: (p: TaskProgress) => void): Promise<() => void> {

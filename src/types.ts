@@ -151,6 +151,7 @@ export interface SessionItem {
     size?: string;
     quality?: string;
     count?: number;
+    seed?: string;
   };
   updated_at: string;
 }

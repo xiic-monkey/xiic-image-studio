@@ -6,6 +6,7 @@ export interface Prefill {
   size?: string;
   quality?: string;
   count?: number;
+  seed?: string;
   refs?: RefImage[];
   nonce: number;
 }

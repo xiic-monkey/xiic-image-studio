@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import MaskEditor from "../components/MaskEditor";
 import Select from "../components/Select";
 import TaskPanel, { useTaskFeed, type TaskView } from "../components/TaskPanel";
 import { api } from "../ipc";
 import { usePrefill } from "../stores/prefill";
 import { useProviders } from "../stores/providers";
+import { TEMPLATES } from "../templates";
 import { PROTOCOL_LABELS, type RefImage, type SessionItem } from "../types";
 
 const SIZE_PRESETS = ["1024x1024", "1536x1024", "1024x1536", "2048x2048"];
@@ -23,6 +25,52 @@ function fileToRef(file: File): Promise<RefImage> {
   });
 }
 
+// 批量文件解析：支持 JSONL（每行为 JSON 对象或裸提示词）/ CSV（prompt[,size,quality,seed]）/ 纯文本（每行一个提示词）。
+interface BatchItem {
+  prompt: string;
+  size?: string;
+  quality?: string;
+  seed?: string;
+  n?: string;
+}
+
+function parseBatch(text: string): BatchItem[] {
+  const lines = text.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  const items: BatchItem[] = [];
+  for (const line of lines) {
+    if (line.startsWith("{")) {
+      try {
+        const o = JSON.parse(line);
+        const p = o.prompt ?? o.p;
+        if (p) {
+          items.push({
+            prompt: String(p),
+            size: o.size,
+            quality: o.quality,
+            seed: o.seed != null ? String(o.seed) : undefined,
+            n: o.n != null ? String(o.n) : undefined,
+          });
+        }
+      } catch {
+        items.push({ prompt: line });
+      }
+    } else if (line.toLowerCase().startsWith("prompt")) {
+      continue; // CSV 表头行
+    } else if (line.includes(",")) {
+      const [p, sz, q, sd] = line.split(",");
+      items.push({
+        prompt: (p ?? "").trim(),
+        size: sz?.trim() || undefined,
+        quality: q?.trim() || undefined,
+        seed: sd?.trim() || undefined,
+      });
+    } else {
+      items.push({ prompt: line });
+    }
+  }
+  return items.filter((i) => i.prompt);
+}
+
 export default function WorkbenchView() {
   const { providers, load } = useProviders();
   const { tasks, imgUrls, upsert, cancel, remove } = useTaskFeed();
@@ -32,6 +80,8 @@ export default function WorkbenchView() {
   const [size, setSize] = useState("1024x1024");
   const [quality, setQuality] = useState("auto");
   const [count, setCount] = useState(1);
+  const [seed, setSeed] = useState("");
+  const [tplOpen, setTplOpen] = useState(false);
   const [refs, setRefs] = useState<RefImage[]>([]);
   const [mask, setMask] = useState<RefImage | null>(null);
   const [maskEditing, setMaskEditing] = useState(false);
@@ -63,6 +113,7 @@ export default function WorkbenchView() {
       setSize(s.draft.size ?? "1024x1024");
       setQuality(s.draft.quality ?? "auto");
       setCount(s.draft.count ?? 1);
+      setSeed(s.draft.seed ?? "");
     } else if (list.length === 0) {
       const id = await api.sessionSave({ name: "默认会话" });
       setSessions(await api.sessionList());
@@ -85,7 +136,7 @@ export default function WorkbenchView() {
     const t = setTimeout(() => {
       api.sessionSave({
         id: sessionId,
-        draft: { providerId, prompt, size, quality, count },
+        draft: { providerId, prompt, size, quality, count, seed },
       });
     }, 800);
     return () => clearTimeout(t);
@@ -99,6 +150,7 @@ export default function WorkbenchView() {
     if (prefill.size) setSize(prefill.size);
     if (prefill.quality) setQuality(prefill.quality);
     if (prefill.count) setCount(prefill.count);
+    if (prefill.seed) setSeed(prefill.seed);
     if (prefill.refs?.length) setRefs((prev) => [...prefill.refs!, ...prev].slice(0, 4));
   }, [prefill]);
 
@@ -156,6 +208,7 @@ export default function WorkbenchView() {
             n,
             size: size || undefined,
             quality: showQuality ? (quality === "auto" ? undefined : quality) : undefined,
+            seed: seed ? Number(seed) : undefined,
             refs,
             mask: supportsMask && mask ? mask : undefined,
           });
@@ -181,6 +234,62 @@ export default function WorkbenchView() {
       }
     } catch (e) {
       setNotice(String(e));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // 批量文件导入：读文本文件 → 解析 → 逐行提交（复用 generateSubmit）。
+  const importBatch = async () => {
+    if (!provider) {
+      setNotice("请先在「供应商」页添加并保存供应商");
+      return;
+    }
+    const picked = await open({
+      multiple: false,
+      filters: [{ name: "批量", extensions: ["jsonl", "csv", "txt"] }],
+    });
+    if (!picked || Array.isArray(picked)) return;
+    setSubmitting(true);
+    try {
+      const text = await api.readTextFile(picked);
+      const items = parseBatch(text);
+      if (items.length === 0) {
+        setNotice("文件为空或无有效行");
+        return;
+      }
+      let ok = 0;
+      for (const it of items) {
+        const n = it.n ? Number(it.n) : 1;
+        try {
+          const taskId = await api.generateSubmit({
+            provider_id: provider.id,
+            prompt: it.prompt,
+            n,
+            size: it.size || size || undefined,
+            quality: showQuality ? (it.quality ?? (quality === "auto" ? undefined : quality)) : undefined,
+            seed: it.seed ? Number(it.seed) : undefined,
+            refs: [],
+          });
+          upsert({
+            id: taskId,
+            status: "running",
+            done: 0,
+            total: n,
+            errors: [],
+            images: [],
+            createdAt: new Date().toISOString(),
+            prompt: it.prompt,
+          });
+          ok += 1;
+        } catch (e) {
+          setNotice(`批量提交在第 ${ok + 1} 行失败：${String(e)}（已提交 ${ok} 条）`);
+          break;
+        }
+      }
+      if (ok === items.length) setNotice(`已提交 ${ok} 个批量任务`);
+    } catch (e) {
+      setNotice(`读取/解析失败：${String(e)}`);
     } finally {
       setSubmitting(false);
     }
@@ -421,8 +530,8 @@ export default function WorkbenchView() {
           )}
         </div>
 
-        {/* 参数行：尺寸 / 质量 / 数量并排（数量列定宽只放数字放行尾，把宽度让给前两个；质量仅 openai_images 协议显示） */}
-        <div className={`grid gap-2 ${showQuality ? "grid-cols-[minmax(0,1fr)_minmax(0,1fr)_4.5rem]" : "grid-cols-[minmax(0,1fr)_4.5rem]"}`}>
+        {/* 参数行：尺寸 / 质量 / 数量 / 种子并排（数量与种子列定宽只放数字放行尾，把宽度让给前两个；质量仅 openai_images 协议显示） */}
+        <div className={`grid gap-2 ${showQuality ? "grid-cols-[minmax(0,1fr)_minmax(0,1fr)_3.5rem_3.5rem]" : "grid-cols-[minmax(0,1fr)_3.5rem_3.5rem]"}`}>
           <div>
             <label className={labelCls}>尺寸</label>
             <Select
@@ -452,14 +561,66 @@ export default function WorkbenchView() {
               options={[1, 2, 3, 4, 6, 8].map((n) => ({ value: String(n), label: String(n) }))}
             />
           </div>
+          <div>
+            <label className={labelCls} title="仅部分协议生效（openai_images / chat / gemini）">种子</label>
+            <input
+              type="number"
+              className={selCls}
+              value={seed}
+              onChange={(e) => setSeed(e.target.value)}
+              placeholder="随机"
+            />
+          </div>
         </div>
 
         {notice && <div className="rounded-md bg-blue-50 px-3 py-2 text-xs text-blue-700 dark:bg-blue-950 dark:text-blue-400">{notice}</div>}
 
-        <button className="w-full rounded-md bg-orange-600 py-1.5 text-sm font-medium text-white hover:bg-orange-700 disabled:opacity-50"
-          onClick={submit} disabled={submitting}>
-          {submitting ? "提交中…" : "生成"}
-        </button>
+        <div className="flex gap-2">
+          <button
+            className="rounded-md border border-neutral-300 px-3 py-1.5 text-sm text-neutral-700 hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-800"
+            onClick={() => setTplOpen((o) => !o)} disabled={submitting}>
+            模板
+          </button>
+          <button
+            className="rounded-md border border-neutral-300 px-3 py-1.5 text-sm text-neutral-700 hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-800"
+            onClick={importBatch} disabled={submitting}>
+            导入批量
+          </button>
+          <button className="flex-1 rounded-md bg-orange-600 py-1.5 text-sm font-medium text-white hover:bg-orange-700 disabled:opacity-50"
+            onClick={submit} disabled={submitting}>
+            {submitting ? "提交中…" : "生成"}
+          </button>
+        </div>
+
+        {tplOpen && (
+          <div className="rounded-md border border-neutral-200 p-3 dark:border-neutral-800">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-xs font-medium text-neutral-500">插入预设模板（追加到提示词）</span>
+              <button className="text-xs text-neutral-400 hover:underline" onClick={() => setTplOpen(false)}>关闭</button>
+            </div>
+            <div className="space-y-2">
+              {TEMPLATES.map((c) => (
+                <div key={c.cat}>
+                  <div className="text-[11px] font-medium text-neutral-500">{c.cat}</div>
+                  <div className="mt-1 flex flex-wrap gap-1.5">
+                    {c.items.map((t) => (
+                      <button
+                        key={t.title}
+                        className="rounded-md border border-neutral-200 px-2 py-1 text-[11px] hover:border-orange-300 hover:bg-orange-50 dark:border-neutral-800 dark:hover:border-orange-700 dark:hover:bg-orange-950"
+                        onClick={() => {
+                          setPrompt((prev) => (prev ? `${prev}\n${t.prompt}` : t.prompt));
+                          if (t.size) setSize(t.size);
+                          if (t.quality) setQuality(t.quality);
+                          setTplOpen(false);
+                        }}
+                      >{t.title}</button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* 右：任务面板 */}

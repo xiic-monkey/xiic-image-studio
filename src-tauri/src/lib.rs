@@ -24,6 +24,22 @@ use sessions::{session_delete, session_list, session_save};
 use std::path::PathBuf;
 use storage::Db;
 use tauri::Manager;
+use crate::error::AppResult;
+
+/// 读取用户通过文件对话框选中的文本文件（批量导入用）。仅读用户显式选中的路径，
+/// 上限 16MB，避免误读大文件卡住 UI。
+#[tauri::command]
+fn read_text_file(path: String) -> AppResult<String> {
+    let p = PathBuf::from(&path);
+    if !p.is_file() {
+        return Err(crate::error::AppError::General(format!("文件不存在: {path}")));
+    }
+    let meta = std::fs::metadata(&p).map_err(|e| crate::error::AppError::General(e.to_string()))?;
+    if meta.len() > 16 * 1024 * 1024 {
+        return Err(crate::error::AppError::General("文件过大（超过 16MB），请拆小后再导入".into()));
+    }
+    std::fs::read_to_string(&p).map_err(|e| crate::error::AppError::General(format!("读取失败: {e}")))
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -153,6 +169,7 @@ pub fn run() {
             tools_video_frames,
             tools_file_b64,
             tools_set_ffmpeg_path,
+            read_text_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

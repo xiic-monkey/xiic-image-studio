@@ -131,6 +131,9 @@ pub async fn openai_images(ctx: &GenCtx) -> AppResult<ImageOut> {
         if let Some(q) = &ctx.quality {
             form = form.text("quality", q.clone());
         }
+        if let Some(s) = ctx.seed {
+            form = form.text("seed", s.to_string());
+        }
         for r in &ctx.refs {
             let file = reqwest::multipart::Part::bytes(b64_decode(&r.data)?)
                 .file_name(if r.name.is_empty() { "ref.png".into() } else { r.name.clone() })
@@ -155,6 +158,9 @@ pub async fn openai_images(ctx: &GenCtx) -> AppResult<ImageOut> {
         }
         if let Some(q) = &ctx.quality {
             body["quality"] = json!(q);
+        }
+        if let Some(s) = ctx.seed {
+            body["seed"] = json!(s);
         }
         send_json(rb.json(&body)).await?
     };
@@ -185,10 +191,13 @@ pub async fn openai_chat_image(ctx: &GenCtx) -> AppResult<ImageOut> {
             "image_url": {"url": data_url(&r.mime, &r.data)}
         }));
     }
-    let body = json!({
+    let mut body = json!({
         "model": ctx.model,
         "messages": [{"role": "user", "content": content}],
     });
+    if let Some(s) = ctx.seed {
+        body["seed"] = json!(s);
+    }
 
     let rb = apply_headers(client.post(&url).bearer_auth(&ctx.key), &ctx.custom_headers);
     let resp_body: Value = send_json(rb.json(&body)).await?;
@@ -248,9 +257,12 @@ pub async fn gemini_native(ctx: &GenCtx) -> AppResult<ImageOut> {
             "inlineData": {"mimeType": r.mime, "data": r.data.trim()}
         }));
     }
-    let body = json!({
+    let mut body = json!({
         "contents": [{"parts": parts}],
     });
+    if let Some(s) = ctx.seed {
+        body["seed"] = json!(s);
+    }
 
     let rb = apply_headers(
         client.post(&url).header("x-goog-api-key", &ctx.key),

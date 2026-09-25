@@ -23,7 +23,8 @@ pub struct GenerateRequest {
     /// openai images: auto/low/medium/high 或 standard/hd
     #[serde(default)]
     pub quality: Option<String>,
-    /// 仅记录，多数协议不支持
+    /// 随机种子：支持的协议（openai_images / chat / gemini）会写进请求体，
+    /// 上游不支持时静默忽略，不影响其他参数。
     #[serde(default)]
     pub seed: Option<u64>,
     #[serde(default)]
