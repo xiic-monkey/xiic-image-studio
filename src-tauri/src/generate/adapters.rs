@@ -301,6 +301,10 @@ pub async fn openai_chat_image(ctx: &GenCtx) -> AppResult<ImageOut> {
 // ---------- Gemini 原生 ----------
 
 pub async fn gemini_native(ctx: &GenCtx) -> AppResult<ImageOut> {
+    let caps = capabilities::for_model(Protocol::GeminiNative, &ctx.model);
+    if caps.endpoint == capabilities::ENDPOINT_PREDICT {
+        return gemini_predict(ctx).await;
+    }
     let client = image_client();
     let model = ctx.model.trim_start_matches("models/");
     let url = join_url(&ctx.base_url, &format!("/v1beta/models/{model}:generateContent"));
@@ -314,8 +318,18 @@ pub async fn gemini_native(ctx: &GenCtx) -> AppResult<ImageOut> {
     let mut body = json!({
         "contents": [{"parts": parts}],
     });
-    if let Some(s) = ctx.seed {
-        body["seed"] = json!(s);
+    // seed 与画面比例都在 generationConfig 里，放顶层会被上游忽略
+    let mut generation_config = serde_json::Map::new();
+    if let Some(size) = allowed(caps.sizes, &ctx.size) {
+        generation_config.insert("aspectRatio".into(), json!(size));
+    }
+    if caps.seed {
+        if let Some(s) = ctx.seed {
+            generation_config.insert("seed".into(), json!(s));
+        }
+    }
+    if !generation_config.is_empty() {
+        body["generationConfig"] = json!(generation_config);
     }
 
     let rb = apply_headers(
@@ -350,6 +364,51 @@ pub async fn gemini_native(ctx: &GenCtx) -> AppResult<ImageOut> {
         }
     }
     Err(AppError::Fetch("Gemini 响应中无图片 part".into()))
+}
+
+/// Imagen 走 :predict 端点（不是 :generateContent）：请求是 instances + parameters，
+/// 响应是 predictions[].bytesBase64Encoded。
+async fn gemini_predict(ctx: &GenCtx) -> AppResult<ImageOut> {
+    let caps = capabilities::for_model(Protocol::GeminiNative, &ctx.model);
+    let client = image_client();
+    let model = ctx.model.trim_start_matches("models/");
+    let url = join_url(&ctx.base_url, &format!("/v1beta/models/{model}:predict"));
+
+    let mut parameters = serde_json::Map::new();
+    if let Some(size) = allowed(caps.sizes, &ctx.size) {
+        parameters.insert("aspectRatio".into(), json!(size));
+    }
+    parameters.insert("sampleImageSize".into(), json!("1K"));
+    let body = json!({
+        "instances": [{"prompt": ctx.prompt}],
+        "parameters": serde_json::Value::Object(parameters),
+    });
+
+    let rb = apply_headers(
+        client.post(&url).header("x-goog-api-key", &ctx.key),
+        &ctx.custom_headers,
+    );
+    let resp_body: Value = send_json(rb.json(&body)).await?;
+
+    if let Some(err) = resp_body.get("error") {
+        return Err(AppError::Upstream(format!(
+            "上游报错: {}",
+            err["message"].as_str().unwrap_or(&err.to_string())
+        )));
+    }
+    let predictions = resp_body["predictions"].as_array().ok_or_else(|| {
+        AppError::Fetch(format!(
+            "Imagen 响应无 predictions: {}",
+            resp_body.to_string().chars().take(200).collect::<String>()
+        ))
+    })?;
+    for p in predictions {
+        if let Some(b64) = p["bytesBase64Encoded"].as_str() {
+            let mime = p["mimeType"].as_str().unwrap_or("image/png");
+            return Ok(ImageOut::new(b64_decode(b64)?, mime));
+        }
+    }
+    Err(AppError::Fetch("Imagen 响应中无 bytesBase64Encoded".into()))
 }
 
 // ---------- Midjourney Proxy ----------
@@ -585,6 +644,48 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn gemini_puts_seed_inside_generation_config() {
+        let (base, cap) = capture_server(
+            r#"{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"aGk="}}]}}]}"#,
+        );
+        let mut c = ctx(base, "gemini-2.5-flash-image");
+        c.size = Some("16:9".into());
+        c.quality = None;
+        let _ = super::gemini_native(&c).await;
+        let (head, body) = cap.lock().unwrap().clone();
+        assert!(
+            head.starts_with("POST /v1beta/models/gemini-2.5-flash-image:generateContent"),
+            "实际请求行：{head}"
+        );
+        let v: Value = serde_json::from_str(&body).expect("请求体应是 JSON");
+        assert!(v.get("seed").is_none(), "seed 不能放顶层：{body}");
+        assert_eq!(v["generationConfig"]["seed"], 42);
+        assert_eq!(v["generationConfig"]["aspectRatio"], "16:9");
+    }
+
+    #[tokio::test]
+    async fn imagen_uses_predict_endpoint_and_reads_predictions() {
+        let (base, cap) = capture_server(
+            r#"{"predictions":[{"mimeType":"image/png","bytesBase64Encoded":"aGk="}]}"#,
+        );
+        let mut c = ctx(base, "imagen-4.0-generate-001");
+        c.size = Some("1:1".into());
+        c.quality = None;
+        c.seed = None;
+        let out = super::gemini_native(&c).await.expect("imagen 应成功");
+        let (head, body) = cap.lock().unwrap().clone();
+        assert!(
+            head.starts_with("POST /v1beta/models/imagen-4.0-generate-001:predict"),
+            "实际请求行：{head}"
+        );
+        assert_eq!(out.bytes, b"hi");
+        let v: Value = serde_json::from_str(&body).expect("请求体应是 JSON");
+        assert_eq!(v["instances"][0]["prompt"], "cat");
+        assert_eq!(v["parameters"]["aspectRatio"], "1:1");
+        assert_eq!(v["parameters"]["sampleImageSize"], "1K");
+    }
+
     #[test]
     fn missing_image_payload_is_not_retryable() {
         let result = futures::executor::block_on(image_from_data(&json!({ "data": [] })));
@@ -596,7 +697,6 @@ mod tests {
             ),
         }
     }
-
     #[tokio::test]
     async fn download_404_is_not_retryable() {
         let url = serve_images(vec![(404, "missing")]);
