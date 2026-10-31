@@ -75,7 +75,10 @@ ProviderConfig {
 ### Phase 2（M4+，已实现）
 8. **局部重绘**：Canvas 蒙版涂抹 → images/edits（仅 OpenAI Images 协议精确蒙版，其他协议退化为普通图生图）
 9. **图片工具箱**（ffmpeg sidecar）：webp/avif/png 转换、批量压缩、GIF 合成、视频抽帧做参考图、改尺寸
-10. **批量任务**：工作台「多行提示词 = 每行一个任务」+ **JSONL/CSV 文件导入**（"导入批量"按钮，支持 `prompt[,size,quality,seed]` / JSON 对象行 / 纯文本每行一提示词）
+10. **批量任务**：工作台「按行批量」开关（默认关）——开着时一行一个任务、每行 1 张；
+    关着时整段多行文本按**一条**提示词提交，`数量`生效。换行本身不再隐含批量，
+    模板追加因此能把多段描述合成一条。另有 **JSONL/CSV 文件导入**（"导入批量"按钮，
+    支持 `prompt[,size,quality,seed]` / JSON 对象行 / 纯文本每行一提示词）。
 11. **MJ 扩展操作**：U/V 放大变换按钮（后端 `mj_action` worker + 前端 GalleryView）
 12. **预设模板库**：内置电商/头像/插画/摄影四类场景模板，工作台「模板」按钮插入（追加到提示词，可选带 size/quality）
 
@@ -139,6 +142,7 @@ xiic-image-studio/
 │   ├── views/{Workbench,Gallery,Providers,Prompts,Tools}View.tsx
 │   ├── components/{TaskPanel,MaskEditor,ProviderForm,Select,TrafficLights}.tsx
 │   ├── stores/{prefill,providers}.ts
+│   ├── lib/{submission,mask-geometry}.ts + 同名 .test.ts   # 纯函数（提交语义 / 蒙版几何），node --test
 │   └── ipc.ts
 └── scripts/fetch-ffmpeg.sh        # 打包前拉 ffmpeg sidecar（GitHub Release tag ffmpeg-v1）
 ```
@@ -165,7 +169,7 @@ xiic-image-studio/
   （无头侧靠 `dirs::data_dir()` + `com.xiic.image-studio` 定位，须与 tauri `app_data_dir()` 一致）。
 - 写库三条硬约束：① 图片必须落在 `<data_dir>/images/<task_id>/`（否则 `image_read_b64` 越界校验拒绝）；
   ② 必须写 `tasks`（status running→completed/failed）与 `images`（含 thumb_path），工作台才可见；
-  ③ `busy_timeout(10s)`（WAL 只解读写冲突，不解写写冲突）。
+  ③ `busy_timeout(10s)` 由 `storage::init()` 统一设置（GUI 与无头共用同一条约束；WAL 只解读写冲突，不解写写冲突）。
 - 前端对无头写入的任务**靠轮询发现**（TaskPanel 3s / Gallery 5s，带指纹比对避免重渲染）。
 
 ## 11. 关键决策记录
@@ -176,6 +180,9 @@ xiic-image-studio/
 - **图片落盘 + 元数据进库**：库坏了好恢复，目录可以直接当相册用
 - **ffmpeg 做 sidecar 而非编译进 Rust**：升级独立、体积可控；打包前由 `scripts/fetch-ffmpeg.sh` 从
   GitHub Release（tag `ffmpeg-v1`）拉取自包含二进制到 `src-tauri/binaries/`，**不进 git**（43.5MB）
+- **库写失败一律冒泡，启动期例外只打 stderr**：图片入库/任务状态写不回会静默丢数据，必须报错；
+  但 `setup` 里 panic 会让从 Finder 启动的用户只看到"双击没反应"，所以启动两项（遗留任务清理、
+  明文 Key 加密回写）显式打日志后继续，后续每一次写库都会硬报错来暴露库不可用。
 
 ## 12. 待办 / 已知限制
 
