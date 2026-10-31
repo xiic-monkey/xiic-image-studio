@@ -4,6 +4,7 @@ import MaskEditor from "../components/MaskEditor";
 import Select from "../components/Select";
 import TaskPanel, { useTaskFeed, type TaskView } from "../components/TaskPanel";
 import { api } from "../ipc";
+import { buildSubmissions, pickPrefillPrompt, remainingText } from "../lib/submission";
 import { usePrefill } from "../stores/prefill";
 import { useProviders } from "../stores/providers";
 import { TEMPLATES } from "../templates";
@@ -77,6 +78,7 @@ export default function WorkbenchView() {
 
   const [providerId, setProviderId] = useState("");
   const [prompt, setPrompt] = useState("");
+  const [batchMode, setBatchMode] = useState(false);
   const [size, setSize] = useState("1024x1024");
   const [quality, setQuality] = useState("auto");
   const [count, setCount] = useState(1);
@@ -114,6 +116,7 @@ export default function WorkbenchView() {
       setQuality(s.draft.quality ?? "auto");
       setCount(s.draft.count ?? 1);
       setSeed(s.draft.seed ?? "");
+      setBatchMode(s.draft.batchMode ?? false);
     } else if (list.length === 0) {
       const id = await api.sessionSave({ name: "默认会话" });
       setSessions(await api.sessionList());
@@ -136,17 +139,17 @@ export default function WorkbenchView() {
     const t = setTimeout(() => {
       api.sessionSave({
         id: sessionId,
-        draft: { providerId, prompt, size, quality, count, seed },
+        draft: { providerId, prompt, size, quality, count, seed, batchMode },
       });
     }, 800);
     return () => clearTimeout(t);
-  }, [sessionId, providerId, prompt, size, quality, count]);
+  }, [sessionId, providerId, prompt, size, quality, count, seed, batchMode]);
 
   // ---- 画廊/提示词回填 ----
   const prefill = usePrefill((s) => s.prefill);
   useEffect(() => {
     if (!prefill) return;
-    setPrompt(prefill.prompt ?? "");
+    setPrompt((prev) => pickPrefillPrompt(prev, prefill.prompt));
     if (prefill.size) setSize(prefill.size);
     if (prefill.quality) setQuality(prefill.quality);
     if (prefill.count) setCount(prefill.count);
@@ -187,32 +190,30 @@ export default function WorkbenchView() {
       setNotice("请先在「供应商」页添加并保存供应商");
       return;
     }
-    if (!prompt.trim()) {
+    const submissions = buildSubmissions(prompt, batchMode, count);
+    if (submissions.length === 0) {
       setNotice("请输入提示词");
       return;
     }
     setSubmitting(true);
     setNotice(null);
     try {
-      const lines = prompt.trim().split("\n").map((s) => s.trim()).filter(Boolean);
-      const batch = lines.length > 1 ? lines : [prompt.trim()];
-      const n = batch.length > 1 ? 1 : count;
       let submitted = 0;
       let failMsg: string | null = null;
 
-      for (const line of batch) {
+      for (const s of submissions) {
         try {
           const taskId = await api.generateSubmit({
             provider_id: provider.id,
-            prompt: line,
-            n,
+            prompt: s.prompt,
+            n: s.n,
             size: size || undefined,
             quality: showQuality ? (quality === "auto" ? undefined : quality) : undefined,
             seed: seed ? Number(seed) : undefined,
             refs,
             mask: supportsMask && mask ? mask : undefined,
           });
-          upsert({ id: taskId, status: "running", done: 0, total: n, errors: [], images: [], createdAt: new Date().toISOString(), prompt: line });
+          upsert({ id: taskId, status: "running", done: 0, total: s.n, errors: [], images: [], createdAt: new Date().toISOString(), prompt: s.prompt });
           submitted += 1;
         } catch (e) {
           failMsg = String(e);
@@ -227,10 +228,17 @@ export default function WorkbenchView() {
         setPrompt("");
         setRefs([]);
         setMask(null);
-        setNotice(batch.length > 1 ? `已提交 ${submitted} 个任务` : null);
+        const multiline = prompt.trim().includes("\n");
+        setNotice(
+          submissions.length > 1
+            ? `已提交 ${submitted} 个任务`
+            : multiline
+              ? "已提交 1 个任务（整段文本按一条提示词处理；要每行一个任务请打开「按行批量」）"
+              : null,
+        );
       } else {
-        setPrompt(batch.slice(submitted).join("\n"));
-        setNotice(`已提交 ${submitted}/${batch.length} 条，第 ${submitted + 1} 条提交失败：${failMsg}`);
+        setPrompt(remainingText(submissions, submitted));
+        setNotice(`已提交 ${submitted}/${submissions.length} 条，第 ${submitted + 1} 条提交失败：${failMsg}`);
       }
     } catch (e) {
       setNotice(String(e));
@@ -482,9 +490,24 @@ export default function WorkbenchView() {
         </div>
 
         <div>
-          <label className={labelCls}>提示词（多行 = 批量任务，每行一张）</label>
+          <div className="flex items-center justify-between">
+            <label className={labelCls}>提示词</label>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={batchMode}
+              onClick={() => setBatchMode((b) => !b)}
+              className={`rounded-md px-2 py-0.5 text-[11px] transition-colors ${
+                batchMode
+                  ? "bg-orange-100 font-medium text-orange-700 dark:bg-orange-950 dark:text-orange-400"
+                  : "text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+              }`}
+            >{`按行批量 ${batchMode ? "开" : "关"}`}</button>
+          </div>
           <textarea className={`${inputCls} min-h-[120px] resize-y`} value={prompt}
-            onChange={(e) => setPrompt(e.target.value)} placeholder="描述你想要的画面…&#10;需要批量时，一行写一个提示词即可" />
+            onChange={(e) => setPrompt(e.target.value)}
+            placeholder={batchMode ? "一行一个提示词，每行提交一个任务" : "描述你想要的画面…（换行不会拆成多个任务）"} />
+          {batchMode && <p className="mt-1 text-[11px] text-neutral-500">批量模式：每行一个任务、每行 1 张，「数量」不生效。</p>}
         </div>
 
         <div>

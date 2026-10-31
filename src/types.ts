@@ -152,6 +152,7 @@ export interface SessionItem {
     quality?: string;
     count?: number;
     seed?: string;
+    batchMode?: boolean;
   };
   updated_at: string;
 }

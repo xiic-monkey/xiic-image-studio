@@ -86,7 +86,8 @@ export default function ToolsView() {
     if (!url) return;
     const [, data] = url.split(",");
     const mime = url.slice(5, url.indexOf(";"));
-    sendPrefill({ prompt: "", refs: [{ name: path.split("/").pop() ?? "ref.png", mime, data }] });
+    // 只送参考图：提示词不参与回填，否则会把工作台里写到一半的提示词清空
+    sendPrefill({ refs: [{ name: path.split("/").pop() ?? "ref.png", mime, data }] });
   };
 
   const cardCls = "rounded-xl border border-neutral-200 p-4 dark:border-neutral-800";
