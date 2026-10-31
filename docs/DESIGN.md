@@ -88,10 +88,14 @@ ProviderConfig {
     前端靠轮询发现无头进程写入的任务。详见 §10。
 
 ### 参数说明（已对齐实现）
-- **seed**：前端「种子」输入框，透传到 `GenerateRequest.seed`；后端在 openai_images / openai_chat_image / gemini_native
-  的请求体里写入（上游不支持时静默忽略）。Midjourney 代理协议无 seed 概念，不传。
+- **seed（随机种子）**：由「协议 × 模型能力表」（`src-tauri/src/capabilities.rs`）决定是否下发。openai_chat_image 走请求体顶层（Chat Completions 标准参数）；gemini_native 走 `generationConfig.seed`；**openai_images 不下发**（Images API 规范里没有该字段，官方与转 OpenAI 的中转站都会 400）。上游不支持时静默忽略，不影响其他参数。
 - **n（数量）**：前端「数量」选择器 → 后端 `spawn_task` 按 `0..n` 并发 `buffer_unordered`（上限 4）各生成一张，任务 `total=n`。
 - **重试**：仅 `ref_count==0` 的任务（纯文生图）提供重试入口；图生图因参考图未入库，重试会退化，前端据此隐藏入口。
+- **能力表（协议 × 模型）**：`for_model(protocol, model)` 推导该组合实际接受的参数
+  （尺寸取值 / 质量取值 / 是否支持 seed、参考图、蒙版 / 上游端点形态）。
+  适配器据此发参，GUI 与 MCP 提交入口据此裁剪请求，前端据此收敛控件并把不支持项置灰。
+  模型名匹配不到时走宽松兜底行（宁可上游报错，也不静默吞掉用户设的参数）。
+  Imagen（`imagen-*`）走 `:predict` 端点分支。
 
 ## 6. 架构
 
@@ -137,12 +141,13 @@ xiic-image-studio/
 │   ├── mcp.rs / mcp_protocol.rs   # --mcp 无头 stdio 模式
 │   ├── media.rs                   # ffmpeg sidecar + 缩略图
 │   ├── crypto.rs                  # AES-256-GCM 本地密钥
+│   ├── capabilities.rs            # 协议 × 模型能力表（尺寸/质量/seed/参考图/蒙版/端点），唯一事实源
 │   ├── {storage,sessions,gallery,prompts,error}.rs
 ├── src/
 │   ├── views/{Workbench,Gallery,Providers,Prompts,Tools}View.tsx
 │   ├── components/{TaskPanel,MaskEditor,ProviderForm,Select,TrafficLights}.tsx
 │   ├── stores/{prefill,providers}.ts
-│   ├── lib/{submission,mask-geometry}.ts + 同名 .test.ts   # 纯函数（提交语义 / 蒙版几何），node --test
+│   ├── lib/{submission,mask-geometry,capabilities}.ts + 同名 .test.ts   # 纯函数（提交语义 / 蒙版几何 / 能力收敛），node --test
 │   └── ipc.ts
 └── scripts/fetch-ffmpeg.sh        # 打包前拉 ffmpeg sidecar（GitHub Release tag ffmpeg-v1）
 ```
@@ -183,9 +188,13 @@ xiic-image-studio/
 - **库写失败一律冒泡，启动期例外只打 stderr**：图片入库/任务状态写不回会静默丢数据，必须报错；
   但 `setup` 里 panic 会让从 Finder 启动的用户只看到"双击没反应"，所以启动两项（遗留任务清理、
   明文 Key 加密回写）显式打日志后继续，后续每一次写库都会硬报错来暴露库不可用。
+- **能力表而非逐处打补丁**：协议差异多且会变（中转站、模型版本），散落在适配器里迟早再次不一致。
+  收敛成一张 `(protocol, model) → Capabilities` 的纯函数表，适配器、提交入口、前端读同一份，
+  "协议不支持的参数"就只有一个地方能定义。
 
 ## 12. 待办 / 已知限制
 
 - **ffmpeg webp**：macOS 上 brew 版 ffmpeg 默认不带 libwebp，选 webp 会报错；打包用的 sidecar 自带 webp。
-- **seed 兼容性**：仅 openai_images / chat_image / gemini_native 下发；部分中转站无视该字段属正常。
+- **seed 兼容性**：是否下发由能力表决定（openai_chat_image / gemini_native 下发，openai_images 不下发）；
+  部分中转站无视该字段属正常。
 - **批量任务导出**：目前只支持导入，尚未做「把画廊/任务导出成 JSONL」的反向流水线。
