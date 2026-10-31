@@ -84,18 +84,66 @@ pub fn init(conn: &Connection) -> AppResult<()> {
         CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at DESC);
         "#,
     )?;
-    // 旧库迁移：providers 补 api_key 列（已存在则忽略）
-    let _ = conn.execute_batch(
-        "ALTER TABLE providers ADD COLUMN api_key TEXT NOT NULL DEFAULT '';",
-    );
-    // 旧库迁移：tasks 补 total 列
-    let _ = conn.execute_batch("ALTER TABLE tasks ADD COLUMN total INTEGER NOT NULL DEFAULT 1;");
+    migrate_legacy_columns(conn)?;
     Ok(())
+}
+
+/// 旧库补列。列已存在（duplicate column）是正常路径，跳过；
+/// 其他错误（表不存在 / 库损坏 / busy）必须冒出来——否则老库静默缺列，
+/// 要等到第一次 INSERT 才炸，那时已经看不出是迁移失败。
+fn migrate_legacy_columns(conn: &Connection) -> AppResult<()> {
+    add_column_if_absent(
+        conn,
+        "providers",
+        "api_key",
+        "ALTER TABLE providers ADD COLUMN api_key TEXT NOT NULL DEFAULT ''",
+    )?;
+    add_column_if_absent(
+        conn,
+        "tasks",
+        "total",
+        "ALTER TABLE tasks ADD COLUMN total INTEGER NOT NULL DEFAULT 1",
+    )
+}
+
+/// `table` / `column` / `ddl` 全部来自本模块写死的 `&'static str`，不接受任何外部输入，
+/// 因此 `format!` 拼 PRAGMA 不存在注入面。
+fn add_column_if_absent(
+    conn: &Connection,
+    table: &'static str,
+    column: &'static str,
+    ddl: &'static str,
+) -> AppResult<()> {
+    if column_exists(conn, table, column)? {
+        return Ok(());
+    }
+    match conn.execute_batch(ddl) {
+        Ok(()) => Ok(()),
+        // GUI 与 MCP 同时首次启动时可能双双跑到这里，后到的一方报 duplicate
+        Err(e) if is_duplicate_column(&e) => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> AppResult<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(names.iter().any(|n| n == column))
+}
+
+fn is_duplicate_column(e: &rusqlite::Error) -> bool {
+    matches!(e, rusqlite::Error::SqliteFailure(_, Some(msg)) if msg.contains("duplicate column name"))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{init, BUSY_TIMEOUT_MS};
+    use super::{
+        add_column_if_absent, column_exists, init, is_duplicate_column, migrate_legacy_columns,
+        BUSY_TIMEOUT_MS,
+    };
     use rusqlite::Connection;
 
     fn busy_timeout_ms(conn: &Connection) -> i64 {
@@ -115,5 +163,48 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init(&conn).unwrap();
         init(&conn).unwrap();
+    }
+
+    #[test]
+    fn legacy_migration_skips_existing_column() {
+        let conn = Connection::open_in_memory().unwrap();
+        init(&conn).unwrap();
+        // init 建表时已带这两列，再跑一次迁移必须是 no-op（旧实现靠 duplicate column 报错吞掉）
+        migrate_legacy_columns(&conn).unwrap();
+        assert!(column_exists(&conn, "providers", "api_key").unwrap());
+        assert!(column_exists(&conn, "tasks", "total").unwrap());
+    }
+
+    #[test]
+    fn legacy_migration_on_missing_table_is_reported() {
+        let conn = Connection::open_in_memory().unwrap();
+        let err = add_column_if_absent(
+            &conn,
+            "tasks",
+            "total",
+            "ALTER TABLE tasks ADD COLUMN total INTEGER NOT NULL DEFAULT 1",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no such table"), "实际错误：{err}");
+        assert!(!err.is_retryable(), "库结构问题重试无意义");
+    }
+
+    #[test]
+    fn duplicate_column_error_is_recognised() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t (a TEXT NOT NULL)").unwrap();
+        let dup = conn
+            .execute_batch("ALTER TABLE t ADD COLUMN a TEXT NOT NULL DEFAULT ''")
+            .unwrap_err();
+        assert!(is_duplicate_column(&dup), "实际错误：{dup}");
+        // busy 必须走"冒出去"那一支，不能被当成"列已存在"而静默略过
+        let busy = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ffi::ErrorCode::DatabaseBusy,
+                extended_code: 5,
+            },
+            Some("database is locked".into()),
+        );
+        assert!(!is_duplicate_column(&busy));
     }
 }
