@@ -11,6 +11,10 @@ pub enum AppError {
     /// 上游返回非 2xx（带状态码）：按状态码决定是否值得重试
     #[error("上游返回错误（HTTP {0}）：{1}")]
     Status(u16, String),
+    /// 生成请求已经成功，但下载/解析结果失败。重试整个 adapter 会重新生成并重复扣费，
+    /// 因此这里标记为不可重试；下载本身在 adapters 内单独做有限重试。
+    #[error("生成结果获取失败：{0}")]
+    Fetch(String),
     /// 上游业务错误——明确拒绝（内容安全拦截、参数不合法等），重试无意义
     #[error("{0}")]
     Upstream(String),
@@ -25,13 +29,14 @@ impl AppError {
     /// - `Status`：429 限流 / 5xx 服务端故障
     ///
     /// 不重试的一律是"再试也一样"的：4xx 业务错误、内容安全拦截（`Upstream`）、
-    /// 超时（`Timeout`，请求已送达上游、图还在生成）。
+    /// 超时（`Timeout`，请求已送达上游、图还在生成）、生成成功后的下载/解析失败（`Fetch`）。
     pub fn is_retryable(&self) -> bool {
         match self {
             AppError::Http(_) => true,
             AppError::General(_) => true,
             AppError::Status(code, _) => *code == 429 || *code >= 500,
             AppError::Timeout(_) => false,
+            AppError::Fetch(_) => false,
             AppError::Upstream(_) => false,
             AppError::Db(_) => false,
         }

@@ -27,14 +27,23 @@ pub fn image_client() -> Client {
         .expect("failed to build http client")
 }
 
-/// 拼接 URL：base + path，容忍 base 末尾带 / 或带 /v1
+/// 拼接 URL：base + path，容忍 base 末尾带 / 或已带与 path 相同的首个路径段
 pub fn join_url(base: &str, path: &str) -> String {
     let base = base.trim_end_matches('/');
-    // 用户习惯把 /v1 直接填在 baseUrl 里，这里做归一化
-    let base = if base.ends_with("/v1") && !path.starts_with("/v1") {
-        base.trim_end_matches("/v1").to_string()
+    let path = if path.starts_with('/') {
+        path.to_string()
     } else {
-        base.to_string()
+        format!("/{path}")
+    };
+    let first_path_segment = path.trim_start_matches('/').split('/').next().unwrap_or("");
+    let last_base_segment = base.rsplit('/').next().unwrap_or("");
+    // 用户的 baseUrl 经常已经带了 /v1 或 /v1beta；path 也带同一段时只保留一份。
+    let base = if !first_path_segment.is_empty() && first_path_segment == last_base_segment {
+        base.strip_suffix(last_base_segment)
+            .unwrap_or(base)
+            .trim_end_matches('/')
+    } else {
+        base
     };
     format!("{base}{path}")
 }
@@ -187,5 +196,65 @@ pub async fn discover_models(draft: &ProviderDraft, key: &str) -> AppResult<Disc
             models: vec!["midjourney".into(), "midjourney-relax".into(), "midjourney-fast".into(), "midjourney-turbo".into()],
             message: "MJ-Proxy 固定模型名".into(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::join_url;
+
+    #[test]
+    fn base_with_v1_does_not_duplicate_version_segment() {
+        assert_eq!(
+            join_url("https://api.openai.com/v1", "/v1/images/generations"),
+            "https://api.openai.com/v1/images/generations"
+        );
+    }
+
+    #[test]
+    fn base_with_v1beta_does_not_duplicate_version_segment() {
+        assert_eq!(
+            join_url(
+                "https://generativelanguage.googleapis.com/v1beta",
+                "/v1beta/models/gemini-2.5-flash-image:generateContent"
+            ),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent"
+        );
+    }
+
+    #[test]
+    fn trailing_slash_on_base_is_ignored() {
+        assert_eq!(
+            join_url("https://api.openai.com/v1/", "/v1/images/generations"),
+            "https://api.openai.com/v1/images/generations"
+        );
+    }
+
+    #[test]
+    fn unversioned_base_still_gets_version_path() {
+        assert_eq!(
+            join_url("https://api.openai.com", "/v1/images/generations"),
+            "https://api.openai.com/v1/images/generations"
+        );
+    }
+
+    #[test]
+    fn unrelated_base_path_is_preserved() {
+        assert_eq!(
+            join_url("https://proxy.example.com/openai", "/v1/images/generations"),
+            "https://proxy.example.com/openai/v1/images/generations"
+        );
+    }
+
+    #[test]
+    fn mj_base_and_path_join_without_duplication() {
+        assert_eq!(
+            join_url("https://mj.example.com", "/mj/submit/imagine"),
+            "https://mj.example.com/mj/submit/imagine"
+        );
+        assert_eq!(
+            join_url("https://mj.example.com/mj", "/mj/submit/imagine"),
+            "https://mj.example.com/mj/submit/imagine"
+        );
     }
 }

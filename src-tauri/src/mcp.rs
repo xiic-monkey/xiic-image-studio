@@ -460,6 +460,6 @@ mod tests {
             json!(1),
         )
         .unwrap();
-        assert_eq!(response["result"]["error"]["code"], -32601);
+        assert_eq!(response["error"]["code"], -32601);
     }
 }

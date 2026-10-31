@@ -43,36 +43,78 @@ async fn send_json(rb: reqwest::RequestBuilder) -> AppResult<Value> {
 /// 从任意响应数据里拿一张图：b64_json / url / data url
 async fn image_from_data(v: &Value) -> AppResult<ImageOut> {
     if let Some(b64) = v.get("b64_json").and_then(|x| x.as_str()) {
-        return Ok(ImageOut::new(b64_decode(b64)?, "image/png"));
+        let bytes = b64_decode(b64)
+            .map_err(|e| AppError::Fetch(format!("上游图片 base64 解码失败: {e}")))?;
+        return Ok(ImageOut::new(bytes, "image/png"));
     }
     if let Some(url) = v.get("url").and_then(|x| x.as_str()) {
         return download_url(url).await;
     }
-    Err(AppError::General("响应中没有图片数据（b64_json/url 均缺失）".into()))
+    Err(AppError::Fetch("响应中没有图片数据（b64_json/url 均缺失）".into()))
 }
 
+/// 下载生成结果。这里只重试下载本身，绝不重新提交生成请求——
+/// 生成成功的图已经产生费用，重跑 adapter 会重复扣费。
 async fn download_url(url: &str) -> AppResult<ImageOut> {
     if let Some(rest) = url.strip_prefix("data:") {
-        let (head, data) = rest.split_once(',').ok_or_else(|| AppError::General("data url 格式错误".into()))?;
+        let (head, data) = rest
+            .split_once(',')
+            .ok_or_else(|| AppError::Fetch("data url 格式错误".into()))?;
         let mime = head.split(';').next().unwrap_or("image/png").to_string();
-        return Ok(ImageOut { bytes: b64_decode(data)?, mime, meta: None });
+        let bytes =
+            b64_decode(data).map_err(|e| AppError::Fetch(format!("data url 解码失败: {e}")))?;
+        return Ok(ImageOut { bytes, mime, meta: None });
     }
+
     let client = image_client();
-    let resp = client.get(url).send().await?;
-    let mime = resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("image/png")
-        .split(';')
-        .next()
-        .unwrap_or("image/png")
-        .to_string();
-    if !resp.status().is_success() {
-        return Err(AppError::Http(format!("下载图片失败 HTTP {}", resp.status())));
+    let mut last_err = String::new();
+    for attempt in 1..=3 {
+        match client.get(url).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                let mime = resp
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("image/png")
+                    .split(';')
+                    .next()
+                    .unwrap_or("image/png")
+                    .to_string();
+                if status.is_success() {
+                    match resp.bytes().await {
+                        Ok(bytes) if !bytes.is_empty() => {
+                            return Ok(ImageOut {
+                                bytes: bytes.to_vec(),
+                                mime,
+                                meta: None,
+                            });
+                        }
+                        Ok(_) => last_err = "下载到的图片为空".into(),
+                        Err(e) => last_err = format!("读取图片响应失败: {e}"),
+                    }
+                } else {
+                    last_err = format!("下载图片失败 HTTP {status}");
+                    if status.as_u16() != 429 && !status.is_server_error() {
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                last_err = format!("下载图片请求失败: {e}");
+                // 超时通常意味着线路/上游异常，连续三次各等 10 分钟没有意义
+                if e.is_timeout() {
+                    break;
+                }
+            }
+        }
+        if attempt < 3 {
+            tokio::time::sleep(std::time::Duration::from_millis(500 * attempt as u64)).await;
+        }
     }
-    let bytes = resp.bytes().await?.to_vec();
-    Ok(ImageOut { bytes, mime, meta: None })
+    Err(AppError::Fetch(format!(
+        "{last_err}（下载已重试，未重新提交生成）"
+    )))
 }
 
 /// 从文本中提取图片 URL（markdown 图片 / 裸链接 / data url）
@@ -174,7 +216,7 @@ pub async fn openai_images(ctx: &GenCtx) -> AppResult<ImageOut> {
     let first = resp_body["data"]
         .as_array()
         .and_then(|a| a.first())
-        .ok_or_else(|| AppError::General("上游返回为空".into()))?;
+        .ok_or_else(|| AppError::Fetch("上游返回为空".into()))?;
     image_from_data(first).await
 }
 
@@ -238,7 +280,7 @@ pub async fn openai_chat_image(ctx: &GenCtx) -> AppResult<ImageOut> {
             return download_url(&u).await;
         }
     }
-    Err(AppError::General(format!(
+    Err(AppError::Fetch(format!(
         "回复中未解析到图片，原文: {}",
         text.chars().take(300).collect::<String>()
     )))
@@ -278,7 +320,7 @@ pub async fn gemini_native(ctx: &GenCtx) -> AppResult<ImageOut> {
     }
     let candidates = resp_body["candidates"]
         .as_array()
-        .ok_or_else(|| AppError::General(format!("无 candidates: {}", resp_body.to_string().chars().take(200).collect::<String>())))?;
+        .ok_or_else(|| AppError::Fetch(format!("无 candidates: {}", resp_body.to_string().chars().take(200).collect::<String>())))?;
     for cand in candidates {
         if let Some(parts) = cand["content"]["parts"].as_array() {
             for p in parts {
@@ -295,7 +337,7 @@ pub async fn gemini_native(ctx: &GenCtx) -> AppResult<ImageOut> {
             }
         }
     }
-    Err(AppError::General("Gemini 响应中无图片 part".into()))
+    Err(AppError::Fetch("Gemini 响应中无图片 part".into()))
 }
 
 // ---------- Midjourney Proxy ----------
@@ -336,7 +378,7 @@ pub async fn midjourney_proxy(ctx: &GenCtx) -> AppResult<ImageOut> {
                 let img_url = status["imageUrl"]
                     .as_str()
                     .or_else(|| status["image_url"].as_str())
-                    .ok_or_else(|| AppError::General("MJ 成功但无 imageUrl".into()))?;
+                    .ok_or_else(|| AppError::Fetch("MJ 成功但无 imageUrl".into()))?;
                 let mut out = download_url(img_url).await?;
                 out.meta = Some(json!({
                     "mj_task_id": task_id,
@@ -354,4 +396,72 @@ pub async fn midjourney_proxy(ctx: &GenCtx) -> AppResult<ImageOut> {
         }
     }
     Err(AppError::General("MJ 任务超时（5 分钟）".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{download_url, image_from_data};
+    use serde_json::json;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    fn serve_images(responses: Vec<(u16, &'static str)>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for (status, body) in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                let reason = match status {
+                    200 => "OK",
+                    404 => "Not Found",
+                    500 => "Internal Server Error",
+                    _ => "Error",
+                };
+                let head = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        format!("http://{addr}/image.png")
+    }
+
+    #[test]
+    fn missing_image_payload_is_not_retryable() {
+        let result = futures::executor::block_on(image_from_data(&json!({ "data": [] })));
+        match result {
+            Ok(_) => panic!("expected missing payload to fail"),
+            Err(e) => assert!(
+                !e.is_retryable(),
+                "post-generation parse failures must not resubmit: {e}"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn download_404_is_not_retryable() {
+        let url = serve_images(vec![(404, "missing")]);
+        let err = match download_url(&url).await {
+            Ok(_) => panic!("expected 404 to fail"),
+            Err(e) => e,
+        };
+        assert!(
+            !err.is_retryable(),
+            "download failure after generation must not resubmit: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn download_retries_5xx_without_resubmitting_generation() {
+        let url = serve_images(vec![(500, "temporary"), (200, "image-bytes")]);
+        let out = download_url(&url).await.expect("download should retry the 500");
+        assert_eq!(out.bytes, b"image-bytes");
+    }
 }
