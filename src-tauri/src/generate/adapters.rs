@@ -1,5 +1,7 @@
+use crate::capabilities;
 use crate::error::{AppError, AppResult};
 use crate::generate::types::{GenCtx, ImageOut};
+use crate::provider::types::Protocol;
 use base64::Engine;
 use serde_json::{json, Value};
 
@@ -151,7 +153,16 @@ fn extract_urls(text: &str) -> Vec<String> {
 
 // ---------- OpenAI Images ----------
 
+/// 值在能力表里才允许下发；不在就当作没有这个参数。
+fn allowed(table: &[&str], value: &Option<String>) -> Option<String> {
+    value
+        .as_ref()
+        .filter(|v| table.contains(&v.as_str()))
+        .cloned()
+}
+
 pub async fn openai_images(ctx: &GenCtx) -> AppResult<ImageOut> {
+    let caps = capabilities::for_model(Protocol::OpenAiImages, &ctx.model);
     let client = image_client();
     let (path, is_multipart) = if ctx.refs.is_empty() {
         ("/v1/images/generations", false)
@@ -167,15 +178,13 @@ pub async fn openai_images(ctx: &GenCtx) -> AppResult<ImageOut> {
             .text("model", ctx.model.clone())
             .text("prompt", ctx.prompt.clone())
             .text("n", "1");
-        if let Some(size) = &ctx.size {
-            form = form.text("size", size.clone());
+        if let Some(size) = allowed(caps.sizes, &ctx.size) {
+            form = form.text("size", size);
         }
-        if let Some(q) = &ctx.quality {
-            form = form.text("quality", q.clone());
+        if let Some(q) = allowed(caps.quality, &ctx.quality) {
+            form = form.text("quality", q);
         }
-        if let Some(s) = ctx.seed {
-            form = form.text("seed", s.to_string());
-        }
+        // seed 不下发：Images API 规范里没有这个字段
         for r in &ctx.refs {
             let file = reqwest::multipart::Part::bytes(b64_decode(&r.data)?)
                 .file_name(if r.name.is_empty() { "ref.png".into() } else { r.name.clone() })
@@ -183,10 +192,12 @@ pub async fn openai_images(ctx: &GenCtx) -> AppResult<ImageOut> {
             form = form.part("image[]", file);
         }
         if let Some(mask) = &ctx.mask {
-            let file = reqwest::multipart::Part::bytes(b64_decode(&mask.data)?)
-                .file_name("mask.png")
-                .mime_str("image/png")?;
-            form = form.part("mask", file);
+            if caps.mask {
+                let file = reqwest::multipart::Part::bytes(b64_decode(&mask.data)?)
+                    .file_name("mask.png")
+                    .mime_str("image/png")?;
+                form = form.part("mask", file);
+            }
         }
         send_json(rb.multipart(form)).await?
     } else {
@@ -195,15 +206,13 @@ pub async fn openai_images(ctx: &GenCtx) -> AppResult<ImageOut> {
             "prompt": ctx.prompt,
             "n": 1,
         });
-        if let Some(size) = &ctx.size {
+        if let Some(size) = allowed(caps.sizes, &ctx.size) {
             body["size"] = json!(size);
         }
-        if let Some(q) = &ctx.quality {
+        if let Some(q) = allowed(caps.quality, &ctx.quality) {
             body["quality"] = json!(q);
         }
-        if let Some(s) = ctx.seed {
-            body["seed"] = json!(s);
-        }
+        // seed 不下发：Images API 规范里没有这个字段
         send_json(rb.json(&body)).await?
     };
 
@@ -223,6 +232,7 @@ pub async fn openai_images(ctx: &GenCtx) -> AppResult<ImageOut> {
 // ---------- OpenAI Chat 生图 ----------
 
 pub async fn openai_chat_image(ctx: &GenCtx) -> AppResult<ImageOut> {
+    let caps = capabilities::for_model(Protocol::OpenAiChatImage, &ctx.model);
     let client = image_client();
     let url = join_url(&ctx.base_url, "/v1/chat/completions");
 
@@ -237,8 +247,10 @@ pub async fn openai_chat_image(ctx: &GenCtx) -> AppResult<ImageOut> {
         "model": ctx.model,
         "messages": [{"role": "user", "content": content}],
     });
-    if let Some(s) = ctx.seed {
-        body["seed"] = json!(s);
+    if caps.seed {
+        if let Some(s) = ctx.seed {
+            body["seed"] = json!(s);
+        }
     }
 
     let rb = apply_headers(client.post(&url).bearer_auth(&ctx.key), &ctx.custom_headers);
@@ -401,9 +413,11 @@ pub async fn midjourney_proxy(ctx: &GenCtx) -> AppResult<ImageOut> {
 #[cfg(test)]
 mod tests {
     use super::{download_url, image_from_data};
-    use serde_json::json;
+    use crate::generate::types::{GenCtx, RefImage};
+    use serde_json::{json, Value};
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
 
     fn serve_images(responses: Vec<(u16, &'static str)>) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -431,6 +445,144 @@ mod tests {
             }
         });
         format!("http://{addr}/image.png")
+    }
+
+    /// 起一个只回一条固定响应的本地服务器，同时把请求头和请求体抓下来。
+    fn capture_server(response: &'static str) -> (String, Arc<Mutex<(String, String)>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = Arc::new(Mutex::new((String::new(), String::new())));
+        let out = sink.clone();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf: Vec<u8> = Vec::new();
+            let mut tmp = [0u8; 4096];
+            let mut header_end = 0usize;
+            while header_end == 0 {
+                let n = stream.read(&mut tmp).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    header_end = pos + 4;
+                }
+            }
+            let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
+            let content_length = head
+                .lines()
+                .find_map(|l| {
+                    let lower = l.to_ascii_lowercase();
+                    lower
+                        .strip_prefix("content-length:")
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                })
+                .unwrap_or(0);
+            while buf.len() < header_end + content_length {
+                let n = stream.read(&mut tmp).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+            }
+            let end = (header_end + content_length).min(buf.len());
+            let body = String::from_utf8_lossy(&buf[header_end..end]).to_string();
+            *out.lock().unwrap() = (head, body);
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response.len(),
+                response
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.flush();
+        });
+        (format!("http://{addr}"), sink)
+    }
+
+    fn ctx(base: String, model: &str) -> GenCtx {
+        GenCtx {
+            base_url: base,
+            key: "sk-test".into(),
+            model: model.into(),
+            custom_headers: Default::default(),
+            prompt: "cat".into(),
+            size: Some("1024x1024".into()),
+            quality: Some("high".into()),
+            seed: Some(42),
+            refs: vec![],
+            mask: None,
+            cancel: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn openai_images_never_sends_seed() {
+        let (base, cap) = capture_server(r#"{"data":[{"b64_json":"aGk="}]}"#);
+        let _ = super::openai_images(&ctx(base, "gpt-image-1")).await;
+        let (head, body) = cap.lock().unwrap().clone();
+        assert!(
+            head.starts_with("POST /v1/images/generations"),
+            "实际请求行：{head}"
+        );
+        let v: Value = serde_json::from_str(&body).expect("请求体应是 JSON");
+        assert!(v.get("seed").is_none(), "不该发 seed：{body}");
+        assert_eq!(v["size"], "1024x1024");
+        assert_eq!(v["quality"], "high");
+    }
+
+    /// Chat Completions 的 seed 是标准参数，要发；
+    /// 这条用例锁住「去 seed」不能一刀切到 chat 协议上。
+    #[tokio::test]
+    async fn openai_chat_image_sends_seed_but_no_size_or_quality() {
+        let (base, cap) = capture_server(r#"{"choices":[{"message":{"content":"x"}}]}"#);
+        let _ = super::openai_chat_image(&ctx(base, "gpt-4o-image")).await;
+        let (head, body) = cap.lock().unwrap().clone();
+        assert!(
+            head.starts_with("POST /v1/chat/completions"),
+            "实际请求行：{head}"
+        );
+        let v: Value = serde_json::from_str(&body).expect("请求体应是 JSON");
+        assert_eq!(v["seed"], 42, "chat 协议应保留 seed：{body}");
+        assert!(v.get("size").is_none(), "chat 不接受 size：{body}");
+        assert!(v.get("quality").is_none(), "chat 不接受 quality：{body}");
+    }
+
+    #[tokio::test]
+    async fn openai_images_edits_multipart_has_no_seed_field() {
+        let (base, cap) = capture_server(r#"{"data":[{"b64_json":"aGk="}]}"#);
+        let mut c = ctx(base, "gpt-image-1");
+        c.refs = vec![RefImage {
+            name: "r.png".into(),
+            mime: "image/png".into(),
+            data: "aGk=".into(),
+        }];
+        c.mask = Some(RefImage {
+            name: "mask.png".into(),
+            mime: "image/png".into(),
+            data: "aGk=".into(),
+        });
+        let _ = super::openai_images(&c).await;
+        let (head, body) = cap.lock().unwrap().clone();
+        assert!(head.starts_with("POST /v1/images/edits"), "实际请求行：{head}");
+        assert!(!body.contains("name=\"seed\""), "multipart 不该带 seed：{body}");
+        assert!(body.contains("name=\"size\""), "multipart 应带 size");
+        assert!(body.contains("name=\"mask\""), "multipart 应带 mask");
+    }
+
+    #[tokio::test]
+    async fn openai_images_drops_size_not_in_capability_table() {
+        let (base, cap) = capture_server(r#"{"data":[{"b64_json":"aGk="}]}"#);
+        let mut c = ctx(base, "gpt-image-1");
+        c.size = Some("2048x2048".into());
+        let _ = super::openai_images(&c).await;
+        let (_, body) = cap.lock().unwrap().clone();
+        let v: Value = serde_json::from_str(&body).expect("请求体应是 JSON");
+        assert!(
+            v.get("size").is_none(),
+            "2048x2048 对 gpt-image-1 非法：{body}"
+        );
     }
 
     #[test]
