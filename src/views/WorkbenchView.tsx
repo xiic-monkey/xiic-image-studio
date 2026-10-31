@@ -4,13 +4,12 @@ import MaskEditor from "../components/MaskEditor";
 import Select from "../components/Select";
 import TaskPanel, { useTaskFeed, type TaskView } from "../components/TaskPanel";
 import { api } from "../ipc";
+import { isSeedEnabled, normalizeQuality, normalizeSize } from "../lib/capabilities";
 import { buildSubmissions, pickPrefillPrompt, remainingText } from "../lib/submission";
 import { usePrefill } from "../stores/prefill";
 import { useProviders } from "../stores/providers";
 import { TEMPLATES } from "../templates";
 import { PROTOCOL_LABELS, type RefImage, type SessionItem } from "../types";
-
-const SIZE_PRESETS = ["1024x1024", "1536x1024", "1024x1536", "2048x2048"];
 
 function fileToRef(file: File): Promise<RefImage> {
   return new Promise((resolve, reject) => {
@@ -166,8 +165,25 @@ export default function WorkbenchView() {
   }, [providers, providerId]);
 
   const provider = providers.find((p) => p.id === providerId);
-  const showQuality = provider?.protocol === "openai_images";
-  const supportsMask = provider?.protocol === "openai_images";
+  const caps = provider?.capabilities;
+  const sizeOptions = caps?.sizes ?? [];
+  const qualityOptions = caps?.quality ?? [];
+  // 列宽要跟实际渲染出来的控件数量对上，否则会多出空列
+  const paramCols =
+    sizeOptions.length > 0 && qualityOptions.length > 0
+      ? "grid-cols-[minmax(0,1fr)_minmax(0,1fr)_3.5rem_3.5rem]"
+      : sizeOptions.length > 0 || qualityOptions.length > 0
+        ? "grid-cols-[minmax(0,1fr)_3.5rem_3.5rem]"
+        : "grid-cols-[3.5rem_3.5rem]";
+
+  // 切换供应商/模型后，旧的尺寸/质量可能不在新能力表内 → 拉回合法值
+  useEffect(() => {
+    if (!caps) return;
+    const nextSize = normalizeSize(caps, size);
+    if (nextSize !== undefined && nextSize !== size) setSize(nextSize);
+    const nextQuality = normalizeQuality(caps, quality);
+    if (nextQuality !== undefined && nextQuality !== quality) setQuality(nextQuality);
+  }, [caps, size, quality]);
 
   const addFiles = useCallback(async (files: FileList | File[]) => {
     const imgs = Array.from(files).filter((f) => f.type.startsWith("image/"));
@@ -207,11 +223,11 @@ export default function WorkbenchView() {
             provider_id: provider.id,
             prompt: s.prompt,
             n: s.n,
-            size: size || undefined,
-            quality: showQuality ? (quality === "auto" ? undefined : quality) : undefined,
-            seed: seed ? Number(seed) : undefined,
+            size: caps ? normalizeSize(caps, size) ?? undefined : size || undefined,
+            quality: caps ? normalizeQuality(caps, quality) ?? undefined : undefined,
+            seed: caps && isSeedEnabled(caps) && seed ? Number(seed) : undefined,
             refs,
-            mask: supportsMask && mask ? mask : undefined,
+            mask: caps?.mask && mask ? mask : undefined,
           });
           upsert({ id: taskId, status: "running", done: 0, total: s.n, errors: [], images: [], createdAt: new Date().toISOString(), prompt: s.prompt });
           submitted += 1;
@@ -275,7 +291,7 @@ export default function WorkbenchView() {
             prompt: it.prompt,
             n,
             size: it.size || size || undefined,
-            quality: showQuality ? (it.quality ?? (quality === "auto" ? undefined : quality)) : undefined,
+            quality: qualityOptions.length > 0 ? (it.quality ?? (quality === "auto" ? undefined : quality)) : undefined,
             seed: it.seed ? Number(it.seed) : undefined,
             refs: [],
           });
@@ -513,7 +529,7 @@ export default function WorkbenchView() {
         <div>
           <div className="flex items-center justify-between">
             <label className={labelCls}>参考图（最多 4 张，拖拽 / 粘贴 / 点击添加）</label>
-            {refs.length > 0 && supportsMask && (
+            {refs.length > 0 && caps?.mask && (
               <button className="text-xs text-orange-600 hover:underline" onClick={() => setMaskEditing(true)}>
                 {mask ? "重新涂抹" : "涂抹重绘"}
               </button>
@@ -553,28 +569,42 @@ export default function WorkbenchView() {
           )}
         </div>
 
-        {/* 参数行：尺寸 / 质量 / 数量 / 种子并排（数量与种子列定宽只放数字放行尾，把宽度让给前两个；质量仅 openai_images 协议显示） */}
-        <div className={`grid gap-2 ${showQuality ? "grid-cols-[minmax(0,1fr)_minmax(0,1fr)_3.5rem_3.5rem]" : "grid-cols-[minmax(0,1fr)_3.5rem_3.5rem]"}`}>
-          <div>
-            <label className={labelCls}>尺寸</label>
-            <Select
-              className={selCls}
-              value={size}
-              onChange={setSize}
-              options={SIZE_PRESETS.map((s) => ({ value: s, label: s }))}
-            />
-          </div>
-          {showQuality && (
+        {/* 参数行：按协议/模型能力收敛——不支持的能力置灰或不显示，不再静默忽略 */}
+        <div className={`grid gap-2 ${paramCols}`}>
+          {sizeOptions.length > 0 && (
+            <div>
+              <label className={labelCls}>{caps?.sizeLabel ?? "尺寸"}</label>
+              <Select
+                className={selCls}
+                value={size}
+                onChange={setSize}
+                options={sizeOptions.map((s) => ({ value: s, label: s }))}
+              />
+            </div>
+          )}
+          {qualityOptions.length > 0 && (
             <div>
               <label className={labelCls}>质量</label>
               <Select
                 className={selCls}
                 value={quality}
                 onChange={setQuality}
-                options={["auto", "low", "medium", "high"].map((q) => ({ value: q, label: q }))}
+                options={qualityOptions.map((q) => ({ value: q, label: q }))}
               />
             </div>
           )}
+          <div>
+            <label className={labelCls} title="仅部分协议/模型支持，以能力表为准">种子</label>
+            <input
+              type="number"
+              className={selCls}
+              value={seed}
+              onChange={(e) => setSeed(e.target.value)}
+              placeholder="随机"
+              disabled={caps ? !isSeedEnabled(caps) : false}
+              title={caps && !isSeedEnabled(caps) ? "当前协议/模型不支持种子" : "仅部分协议/模型支持，以能力表为准"}
+            />
+          </div>
           <div>
             <label className={labelCls}>数量</label>
             <Select
@@ -582,16 +612,6 @@ export default function WorkbenchView() {
               value={String(count)}
               onChange={(v) => setCount(Number(v))}
               options={[1, 2, 3, 4, 6, 8].map((n) => ({ value: String(n), label: String(n) }))}
-            />
-          </div>
-          <div>
-            <label className={labelCls} title="仅部分协议生效（openai_images / chat / gemini）">种子</label>
-            <input
-              type="number"
-              className={selCls}
-              value={seed}
-              onChange={(e) => setSeed(e.target.value)}
-              placeholder="随机"
             />
           </div>
         </div>
