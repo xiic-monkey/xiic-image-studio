@@ -156,3 +156,79 @@ pub fn delete(conn: &Connection, id: &str) -> AppResult<()> {
     conn.execute("DELETE FROM providers WHERE id = ?1", params![id])?;
     Ok(())
 }
+
+/// 一次性把存量明文 API Key 加密回写（已带 `enc:v1:` 前缀的跳过）。
+/// 幂等，所以每次启动跑一遍；失败必须冒出去——静默跳过等于"加密存储"只对
+/// 之后新存的 key 生效，老数据一直裸奔而没人知道。
+pub fn encrypt_plaintext_keys(conn: &Connection) -> AppResult<usize> {
+    let mut plain: Vec<(String, String)> = Vec::new();
+    {
+        let mut stmt = conn.prepare("SELECT id, api_key FROM providers WHERE api_key <> ''")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        for row in rows {
+            plain.push(row?);
+        }
+    }
+    let mut updated = 0;
+    for (id, key) in plain {
+        if key.starts_with(crate::crypto::PREFIX) {
+            continue;
+        }
+        let enc = crate::crypto::encrypt(&key)?;
+        conn.execute(
+            "UPDATE providers SET api_key = ?2 WHERE id = ?1",
+            params![id, enc],
+        )?;
+        updated += 1;
+    }
+    Ok(updated)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encrypt_plaintext_keys;
+    use rusqlite::params;
+
+    fn insert_provider(conn: &rusqlite::Connection, id: &str, key: &str) {
+        conn.execute(
+            "INSERT INTO providers (id, name, base_url, protocol, model, custom_headers, api_key, created_at, updated_at)
+             VALUES (?1, ?2, 'https://x.test', 'openai_images', '', '{}', ?3, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+            params![id, id, key],
+        )
+        .unwrap();
+    }
+
+    fn key_of(conn: &rusqlite::Connection, id: &str) -> String {
+        conn.query_row("SELECT api_key FROM providers WHERE id = ?1", [id], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn plaintext_keys_are_encrypted_in_place() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::storage::init(&conn).unwrap();
+        insert_provider(&conn, "p-plain", "sk-abcdef");
+        let n = encrypt_plaintext_keys(&conn).unwrap();
+        assert_eq!(n, 1);
+        let stored = key_of(&conn, "p-plain");
+        assert!(stored.starts_with("enc:v1:"), "实际存的是：{stored}");
+        assert_eq!(crate::crypto::decrypt(&stored).unwrap(), "sk-abcdef");
+    }
+
+    #[test]
+    fn already_encrypted_keys_are_skipped() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::storage::init(&conn).unwrap();
+        insert_provider(&conn, "p-enc", "sk-abcdef");
+        encrypt_plaintext_keys(&conn).unwrap();
+        // 幂等：第二次启动不该再动任何行，否则每次都重写一遍密文
+        assert_eq!(encrypt_plaintext_keys(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn key_migration_reports_missing_table() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let err = encrypt_plaintext_keys(&conn).unwrap_err();
+        assert!(err.to_string().contains("no such table"), "实际：{err}");
+    }
+}

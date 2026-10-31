@@ -18,7 +18,7 @@ use base64::Engine;
 use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
 
-const PREFIX: &str = "enc:v1:";
+pub(crate) const PREFIX: &str = "enc:v1:";
 const SALT: &[u8] = b"xiic-image-studio::api-key::v1";
 const NONCE_LEN: usize = 12;
 

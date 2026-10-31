@@ -20,6 +20,7 @@ use generate::QueueState;
 use media::{tools_convert, tools_file_b64, tools_gif, tools_set_ffmpeg_path, tools_status, tools_video_frames};
 use prompts::{prompt_delete, prompt_list, prompt_save};
 use provider::commands::{provider_delete, provider_discover_models, provider_list, provider_save, provider_test};
+use provider::db as provider_db;
 use sessions::{session_delete, session_list, session_save};
 use std::path::PathBuf;
 use storage::Db;
@@ -57,55 +58,28 @@ pub fn run() {
             app.manage(Db(std::sync::Mutex::new(conn)));
             app.manage(QueueState::new());
 
-            // 启动时清理孤儿任务：进程重启意味着所有 in-process worker 都已死，
-            // DB 里残留 status='running' 的行不可能有人推进，批量标记 canceled
-            // （保留错误信息以备排查），否则 UI 会卡在「生成中」无法清理。
+            // 启动期两项写库：失败不 panic、不阻断启动（从 Finder 启动时崩在 setup 里
+            // 只表现为「双击没反应」），但必须打到 stderr——此后每一次写库都会显式
+            // 报错（见 generate::insert_image / finish_task_row），不再静默吞掉。
             if let Some(db) = app.try_state::<Db>() {
-                if let Ok(conn) = db.0.lock() {
-                    // 区分两种情况，别把"其实已经出好图"的任务错标成纯失败：
-                    // - 该任务已经有产出图片 → completed_with_errors（图保留，只是没跑满 n 张）
-                    // - 完全没有任何产出      → canceled
-                    let _ = conn.execute(
-                        "UPDATE tasks SET \
-                           status = CASE WHEN (SELECT COUNT(*) FROM images i WHERE i.task_id = tasks.id) > 0 \
-                                         THEN 'completed_with_errors' ELSE 'canceled' END, \
-                           error = COALESCE(NULLIF(error,''), \
-                                     CASE WHEN (SELECT COUNT(*) FROM images i WHERE i.task_id = tasks.id) > 0 \
-                                          THEN '进程重启，任务中断（已产出的图片已保留）' \
-                                          ELSE '进程重启，遗留任务已自动取消' END), \
-                           finished_at = COALESCE(finished_at, ?1) \
-                         WHERE status='running'",
-                        rusqlite::params![chrono::Utc::now().to_rfc3339()],
-                    );
-                }
-            }
-
-            // 一次性迁移：把存量明文 API Key 加密回写。
-            // 幂等（已加密的跳过），所以每次启动跑一遍也无害——
-            // 没有这一步，"加密存储"就只对之后新保存的 key 生效，老数据继续裸奔。
-            if let Some(db) = app.try_state::<Db>() {
-                if let Ok(conn) = db.0.lock() {
-                    let mut plain: Vec<(String, String)> = Vec::new();
-                    if let Ok(mut stmt) =
-                        conn.prepare("SELECT id, api_key FROM providers WHERE api_key <> ''")
-                    {
-                        if let Ok(rows) = stmt.query_map([], |r| {
-                            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-                        }) {
-                            plain = rows.filter_map(|r| r.ok()).collect();
-                        }
-                    }
-                    for (id, key) in plain {
-                        if key.starts_with("enc:v1:") {
-                            continue;
-                        }
-                        if let Ok(enc) = crate::crypto::encrypt(&key) {
-                            let _ = conn.execute(
-                                "UPDATE providers SET api_key = ?2 WHERE id = ?1",
-                                rusqlite::params![id, enc],
+                match db.0.lock() {
+                    Ok(conn) => {
+                        if let Err(e) = generate::reclaim_orphan_tasks(&conn) {
+                            eprintln!(
+                                "[startup] 遗留任务清理失败，任务队列可能仍显示「生成中」：{e}"
                             );
                         }
+                        match provider_db::encrypt_plaintext_keys(&conn) {
+                            Ok(0) => {}
+                            Ok(n) => eprintln!("[startup] 已把 {n} 个明文 API Key 加密回写"),
+                            Err(e) => {
+                                eprintln!("[startup] API Key 加密回写失败（下次启动会重试）：{e}")
+                            }
+                        }
                     }
+                    Err(e) => eprintln!(
+                        "[startup] 数据库互斥锁已损坏（启动时另一个线程 panic 过）：{e}"
+                    ),
                 }
             }
 

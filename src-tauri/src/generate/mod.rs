@@ -369,6 +369,25 @@ pub fn create_task(
     Ok(task_id)
 }
 
+/// 进程重启 = 所有 in-process worker 已死，库里残留的 `status='running'`
+/// 不可能再有人推进，必须批量收尾，否则 UI 永远卡在「生成中」无法清理。
+/// 有产出的标 completed_with_errors（图片保留），没产出的标 canceled。
+pub fn reclaim_orphan_tasks(conn: &rusqlite::Connection) -> AppResult<u32> {
+    let n = conn.execute(
+        "UPDATE tasks SET \
+           status = CASE WHEN (SELECT COUNT(*) FROM images i WHERE i.task_id = tasks.id) > 0 \
+                         THEN 'completed_with_errors' ELSE 'canceled' END, \
+           error = COALESCE(NULLIF(error,''), \
+                     CASE WHEN (SELECT COUNT(*) FROM images i WHERE i.task_id = tasks.id) > 0 \
+                          THEN '进程重启，任务中断（已产出的图片已保留）' \
+                          ELSE '进程重启，遗留任务已自动取消' END), \
+           finished_at = COALESCE(finished_at, ?1) \
+         WHERE status='running'",
+        params![chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(n as u32)
+}
+
 /// 任务收尾（UI 与无头 MCP 共用）。
 pub fn finish_task_row(
     conn: &rusqlite::Connection,
@@ -478,9 +497,9 @@ pub fn read_file_b64(images_root: &PathBuf, rel_or_abs: &str) -> AppResult<Strin
 
 #[cfg(test)]
 mod tests {
-    use super::{finish_task_row, insert_image, NewImage};
+    use super::{finish_task_row, insert_image, reclaim_orphan_tasks, NewImage};
     use crate::error::AppError;
-    use rusqlite::Connection;
+    use rusqlite::{params, Connection};
 
     fn sample<'a>(id: &'a str) -> NewImage<'a> {
         NewImage {
@@ -495,6 +514,15 @@ mod tests {
             height: 1024,
             size: 1234,
         }
+    }
+
+    fn mark_running(conn: &Connection, id: &str) {
+        conn.execute(
+            "INSERT INTO tasks (id, session_id, provider_id, protocol, request_json, status, concurrency, total, created_at)
+             VALUES (?1, NULL, 'p-1', 'openai_images', '{}', 'running', 1, 1, '2026-01-01T00:00:00+00:00')",
+            params![id],
+        )
+        .unwrap();
     }
 
     #[test]
@@ -540,5 +568,51 @@ mod tests {
             .unwrap();
         assert_eq!(status, "failed");
         assert_eq!(error.as_deref(), Some("上游炸了"));
+    }
+
+    #[test]
+    fn orphan_running_task_without_image_is_canceled() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::storage::init(&conn).unwrap();
+        mark_running(&conn, "t-empty");
+        let n = reclaim_orphan_tasks(&conn).unwrap();
+        assert_eq!(n, 1);
+        let status: String = conn
+            .query_row("SELECT status FROM tasks WHERE id = ?1", ["t-empty"], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "canceled");
+    }
+
+    #[test]
+    fn orphan_task_with_produced_images_keeps_completed_with_errors() {
+        // 已经出好图的任务不能被误报成纯失败：图还在磁盘上，只是没跑满 n 张
+        let conn = Connection::open_in_memory().unwrap();
+        crate::storage::init(&conn).unwrap();
+        mark_running(&conn, "t-partial");
+        insert_image(&conn, &sample("img-partial")).unwrap();
+        // sample() 把图片挂在 task-1 上，这里改挂到刚建的 running 任务下
+        conn.execute(
+            "UPDATE images SET task_id = 't-partial' WHERE id = 'img-partial'",
+            [],
+        )
+        .unwrap();
+        let n = reclaim_orphan_tasks(&conn).unwrap();
+        assert_eq!(n, 1);
+        let (status, error): (String, String) = conn
+            .query_row(
+                "SELECT status, COALESCE(error,'') FROM tasks WHERE id = ?1",
+                ["t-partial"],
+                |r| Ok((r.get(0).unwrap(), r.get(1).unwrap())),
+            )
+            .unwrap();
+        assert_eq!(status, "completed_with_errors");
+        assert!(error.contains("已产出的图片已保留"), "实际：{error}");
+    }
+
+    #[test]
+    fn reclaim_orphan_tasks_reports_write_failure() {
+        let conn = Connection::open_in_memory().unwrap();
+        let err = reclaim_orphan_tasks(&conn).unwrap_err();
+        assert!(err.to_string().contains("no such table"), "实际：{err}");
     }
 }
