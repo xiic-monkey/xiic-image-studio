@@ -1,5 +1,20 @@
 export type Protocol = "openai_images" | "openai_chat_image" | "gemini_native" | "midjourney_proxy";
 
+/** 某个「协议 + 模型」实际接受的参数集合，由后端能力表下发。 */
+export interface Capabilities {
+  /** 允许的尺寸取值；空数组 = 该协议/模型不接受尺寸参数 */
+  sizes: string[];
+  /** 允许的质量取值；空数组 = 不接受 quality */
+  quality: string[];
+  seed: boolean;
+  refs: boolean;
+  mask: boolean;
+  /** 上游端点形态：images | chat | generate_content | predict | mj */
+  endpoint: string;
+  /** 尺寸控件标签：尺寸 | 画面比例 */
+  sizeLabel: string;
+}
+
 export interface ProviderListItem {
   id: string;
   name: string;
@@ -10,6 +25,7 @@ export interface ProviderListItem {
   has_key: boolean;
   created_at: string;
   updated_at: string;
+  capabilities: Capabilities;
 }
 
 export interface ProviderDraft {
