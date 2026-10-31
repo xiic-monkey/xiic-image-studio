@@ -89,6 +89,47 @@ pub(crate) fn save_image(
     ))
 }
 
+/// 一条待写入 `images` 表的记录（字段与表列一一对应）。
+///
+/// 三处写库点（UI 生成、MJ 放大、无头 MCP）以前各写一份 `conn.execute`
+/// 且都 `let _ =` 吞掉错误——图已经在磁盘上，画廊却看不见，用户以为没生成。
+/// 收成一份，并把写失败冒泡给调用方。
+pub(crate) struct NewImage<'a> {
+    pub id: &'a str,
+    pub task_id: &'a str,
+    pub path: &'a str,
+    pub thumb_path: &'a str,
+    pub prompt: &'a str,
+    pub model: &'a str,
+    pub params_json: &'a str,
+    pub width: i64,
+    pub height: i64,
+    pub size: i64,
+}
+
+/// 写入画廊一行；失败返回 `AppError::Db`（不可重试，见 error.rs）。
+pub(crate) fn insert_image(conn: &rusqlite::Connection, img: &NewImage) -> AppResult<()> {
+    conn.execute(
+        "INSERT INTO images (id, task_id, path, thumb_path, prompt, model, params_json, favorite, width, height, size, created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,0,?8,?9,?10,?11)",
+        params![
+            img.id,
+            img.task_id,
+            img.path,
+            img.thumb_path,
+            img.prompt,
+            img.model,
+            img.params_json,
+            img.width,
+            img.height,
+            img.size,
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )
+    .map(|_| ())
+    .map_err(|e| AppError::Db(format!("images 入库失败：{e}")))
+}
+
 pub(crate) fn count_done(conn: &rusqlite::Connection, task_id: &str) -> u32 {
     conn.query_row(
         "SELECT COUNT(*) FROM images WHERE task_id = ?1",
@@ -121,14 +162,23 @@ pub(crate) fn emit_progress(app: &AppHandle, db: &Db, task_id: &str, status: &st
 }
 
 pub(crate) fn finish_task(app: &AppHandle, db: &Db, task_id: &str, status: &str, error: Option<String>) {
-    {
+    let result = {
         let conn = db.0.lock().unwrap();
-        let _ = conn.execute(
-            "UPDATE tasks SET status=?2, error=?3, finished_at=?4 WHERE id=?1",
-            params![task_id, status, error, chrono::Utc::now().to_rfc3339()],
-        );
+        finish_task_row(&conn, task_id, status, error.clone())
+    };
+    match result {
+        Ok(()) => emit_progress(app, db, task_id, status, error, None),
+        // 库没写进去，界面上却显示"完成"——任务列表和 tasks 表就对不上了。
+        // 这种情况直接把失败原因推给前端，让卡片显示为失败。
+        Err(e) => emit_progress(
+            app,
+            db,
+            task_id,
+            "failed",
+            Some(format!("任务状态写入数据库失败：{e}")),
+            None,
+        ),
     }
-    emit_progress(app, db, task_id, status, error, None);
 }
 
 async fn wait_cancel(cancel: &Arc<AtomicBool>) {
@@ -247,17 +297,29 @@ pub(crate) async fn run_one_core(
                     }
                 }
                 let params_json = params_val.to_string();
-                {
+                let inserted = {
                     let conn = db.0.lock().unwrap();
-                    let _ = conn.execute(
-                        "INSERT INTO images (id, task_id, path, thumb_path, prompt, model, params_json, favorite, width, height, size, created_at)
-                         VALUES (?1,?2,?3,?4,?5,?6,?7,0,?8,?9,?10,?11)",
-                        params![
-                            img_id, task_id, path, thumb_path, prompt, model, params_json,
-                            w, h, out.bytes.len() as i64, chrono::Utc::now().to_rfc3339()
-                        ],
-                    );
-                }
+                    insert_image(
+                        &conn,
+                        &NewImage {
+                            id: &img_id,
+                            task_id,
+                            path: &path,
+                            thumb_path: &thumb_path,
+                            prompt,
+                            model,
+                            params_json: &params_json,
+                            width: w,
+                            height: h,
+                            size: out.bytes.len() as i64,
+                        },
+                    )
+                };
+                // 图已经落盘，这里失败只可能是写库失败：包成 Db（不可重试），
+                // 否则会回头重跑整条 adapter 再扣一次费。
+                inserted.map_err(|e| {
+                    AppError::Db(format!("图片已保存到 {path}，但写入画廊失败：{e}"))
+                })?;
                 return Ok(Some(ImageMeta { id: img_id, path, thumb_path }));
             }
             Err(e) => {
@@ -313,11 +375,13 @@ pub fn finish_task_row(
     task_id: &str,
     status: &str,
     error: Option<String>,
-) {
-    let _ = conn.execute(
+) -> AppResult<()> {
+    conn.execute(
         "UPDATE tasks SET status=?2, error=?3, finished_at=?4 WHERE id=?1",
         params![task_id, status, error, chrono::Utc::now().to_rfc3339()],
-    );
+    )
+    .map(|_| ())
+    .map_err(|e| AppError::Db(format!("tasks 收尾写入失败：{e}")))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -410,4 +474,71 @@ pub fn read_file_b64(images_root: &PathBuf, rel_or_abs: &str) -> AppResult<Strin
         "data:{mime};base64,{}",
         base64::engine::general_purpose::STANDARD.encode(bytes)
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{finish_task_row, insert_image, NewImage};
+    use crate::error::AppError;
+    use rusqlite::Connection;
+
+    fn sample<'a>(id: &'a str) -> NewImage<'a> {
+        NewImage {
+            id,
+            task_id: "task-1",
+            path: "/tmp/images/task-1/00-id.png",
+            thumb_path: "/tmp/images/task-1/00-id.thumb.jpg",
+            prompt: "一只猫",
+            model: "gpt-image-1",
+            params_json: "{}",
+            width: 1024,
+            height: 1024,
+            size: 1234,
+        }
+    }
+
+    #[test]
+    fn image_insert_writes_a_row() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::storage::init(&conn).unwrap();
+        insert_image(&conn, &sample("img-1")).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM images", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn image_insert_failure_is_db_error_and_not_retryable() {
+        // 没建表：模拟"图片已落盘但入库失败"。这条错误必须冒出来，
+        // 否则文件在磁盘上、画廊里看不见，用户以为图没生成。
+        let conn = Connection::open_in_memory().unwrap();
+        let err = insert_image(&conn, &sample("img-2")).unwrap_err();
+        assert!(matches!(err, AppError::Db(_)), "实际：{err}");
+        assert!(!err.is_retryable(), "重试整条 adapter 会重复扣费，入库失败一律不可重试");
+    }
+
+    #[test]
+    fn finish_task_row_reports_write_failure() {
+        let conn = Connection::open_in_memory().unwrap();
+        let err = finish_task_row(&conn, "task-1", "completed", None).unwrap_err();
+        assert!(err.to_string().contains("no such table"), "实际：{err}");
+    }
+
+    #[test]
+    fn finish_task_row_writes_status() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::storage::init(&conn).unwrap();
+        let task_id = crate::generate::create_task(&conn, "p-1", "openai_images", "{}", 1).unwrap();
+        finish_task_row(&conn, &task_id, "failed", Some("上游炸了".into())).unwrap();
+        let (status, error): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, error FROM tasks WHERE id = ?1",
+                [task_id.as_str()],
+                |r| Ok((r.get(0).unwrap(), r.get(1).unwrap())),
+            )
+            .unwrap();
+        assert_eq!(status, "failed");
+        assert_eq!(error.as_deref(), Some("上游炸了"));
+    }
 }

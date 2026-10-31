@@ -346,22 +346,35 @@ async fn mj_action_worker(
     match saved {
         Ok((path, thumb_path)) => {
             let img_id = uuid::Uuid::new_v4().to_string();
-            {
+            let prompt_label = format!("[{command}]");
+            let params_json =
+                serde_json::json!({"mj_task_id": new_mj_id, "action": command}).to_string();
+            let inserted = {
                 let conn = db.0.lock().unwrap();
-                let _ = conn.execute(
-                    "INSERT INTO images (id, task_id, path, thumb_path, prompt, model, params_json, favorite, width, height, size, created_at)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,0,?8,?9,?10,?11)",
-                    params![
-                        img_id,
-                        task_id,
-                        path,
-                        thumb_path,
-                        format!("[{command}]"),
-                        model,
-                        serde_json::json!({"mj_task_id": new_mj_id, "action": command}).to_string(),
-                        0, 0, out.bytes.len() as i64,
-                        chrono::Utc::now().to_rfc3339()
-                    ],
+                generate::insert_image(
+                    &conn,
+                    &generate::NewImage {
+                        id: &img_id,
+                        task_id: &task_id,
+                        path: &path,
+                        thumb_path: &thumb_path,
+                        prompt: &prompt_label,
+                        model: &model,
+                        params_json: &params_json,
+                        // MJ 放大图这里不解析尺寸（历史上写 0），保持原值，只补错误冒泡
+                        width: 0,
+                        height: 0,
+                        size: out.bytes.len() as i64,
+                    },
+                )
+            };
+            if let Err(e) = inserted {
+                // 文件已经在磁盘上，只是没进画廊——报失败，别让它变成没人知道的孤儿图
+                return fail(
+                    &app,
+                    &db,
+                    &task_id,
+                    format!("放大图已保存到 {path}，但写入画廊失败：{e}"),
                 );
             }
             generate::emit_progress(&app, &db, &task_id, "completed", None,

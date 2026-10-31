@@ -334,13 +334,19 @@ fn generate(
     } else {
         "completed_with_errors"
     };
-    {
+    // 写库失败不再静默：一张图都没有时直接报错；图已经到手却只是 tasks 行没更新，
+    // 那就把原因放进 warning——不能因为记账失败把已生成（已扣费）的图丢回给用户。
+    let db_error = {
         let conn = db.0.lock().unwrap();
-        finish_task_row(&conn, &task_id, status, errors.first().cloned());
-    }
+        finish_task_row(&conn, &task_id, status, errors.first().cloned()).err()
+    };
 
     if images.is_empty() {
-        bail!("{}", errors.first().cloned().unwrap_or_else(|| "生成失败".into()));
+        let reason = db_error
+            .map(|e| e.to_string())
+            .or_else(|| errors.first().cloned())
+            .unwrap_or_else(|| "生成失败".into());
+        bail!("{reason}");
     }
 
     let mut result = json!({
@@ -351,6 +357,9 @@ fn generate(
     });
     if let Some(err) = errors.first() {
         result["error"] = json!(err);
+    }
+    if let Some(e) = db_error {
+        result["warning"] = json!(format!("图片已入库，但任务状态写入失败：{e}"));
     }
     Ok(result)
 }
