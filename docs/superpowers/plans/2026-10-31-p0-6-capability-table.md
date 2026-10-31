@@ -165,8 +165,18 @@ mod tests {
         sanitize(&caps, &mut r);
         assert!(r.size.is_none(), "2048x2048 不在 gpt-image-1 的尺寸表内");
         assert!(r.quality.is_none(), "hd 不在 gpt-image-1 的质量表内");
-        assert!(r.seed.is_none());
-        assert!(r.mask.is_none());
+        assert!(r.seed.is_none(), "Images API 不支持 seed");
+        // 蒙版是 gpt-image-1 支持的能力，应当保留
+        assert!(r.mask.is_some());
+    }
+
+    #[test]
+    fn sanitize_drops_mask_when_unsupported() {
+        let mut r = req();
+        let caps = for_model(Protocol::GeminiNative, "gemini-2.5-flash-image");
+        sanitize(&caps, &mut r);
+        assert!(r.mask.is_none(), "gemini 不支持蒙版");
+        assert_eq!(r.seed, Some(7), "gemini 支持 seed");
     }
 
     #[test]
@@ -178,8 +188,9 @@ mod tests {
         sanitize(&caps, &mut r);
         assert_eq!(r.size.as_deref(), Some("1024x1024"));
         assert_eq!(r.quality.as_deref(), Some("high"));
-        // seed / mask 对 gpt-image-1 仍不支持
-        assert!(r.seed.is_none() && r.mask.is_none());
+        assert!(r.mask.is_some());
+        // seed 对 gpt-image-1 仍不支持
+        assert!(r.seed.is_none());
     }
 
     #[test]
@@ -243,7 +254,12 @@ const DALL_E3_QUALITY: &[&str] = &["standard", "hd"];
 const GEMINI_RATIOS: &[&str] = &["1:1", "3:4", "4:3", "9:16", "16:9"];
 
 fn normalize_model(model: &str) -> String {
-    model.trim().trim_start_matches("models/").to_ascii_lowercase()
+    // 先小写再剥前缀：`MODELS/Imagen-4.0` 也要归一成 `imagen-4.0`
+    model
+        .trim()
+        .to_ascii_lowercase()
+        .trim_start_matches("models/")
+        .to_string()
 }
 
 /// 推导某个协议+模型的能力。模型名匹配不到就走宽松兜底行：

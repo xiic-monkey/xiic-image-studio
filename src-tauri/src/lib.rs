@@ -1,5 +1,6 @@
 // crypto / error / generate / provider 设为 pub：examples/（如 gen_icon）需要
 // 复用 app 自己的生成链路（provider 配置 + 加密 key + adapters）来出图。
+pub mod capabilities;
 pub mod crypto;
 pub mod error;
 pub mod generate;
