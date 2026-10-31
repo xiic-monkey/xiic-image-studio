@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { toCanvasPoint } from "../lib/mask-geometry";
 import type { RefImage } from "../types";
 
 interface Props {
@@ -12,18 +13,22 @@ export default function MaskEditor({ image, onDone, onClose }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [brush, setBrush] = useState(40);
   const [hasPaint, setHasPaint] = useState(false);
+  // 底图还没画进画布时不能接受笔触：否则涂出来的洞会被随后 drawImage 的底图盖掉
+  const [ready, setReady] = useState(false);
   const painting = useRef(false);
   const last = useRef<{ x: number; y: number } | null>(null);
 
   // 用原始尺寸初始化画布
   useEffect(() => {
     const canvas = canvasRef.current!;
+    setReady(false);
     const img = new Image();
     img.onload = () => {
       canvas.width = img.naturalWidth;
       canvas.height = img.naturalHeight;
       const ctx = canvas.getContext("2d")!;
       ctx.drawImage(img, 0, 0);
+      setReady(true);
     };
     img.src = `data:${image.mime};base64,${image.data}`;
   }, [image]);
@@ -31,14 +36,15 @@ export default function MaskEditor({ image, onDone, onClose }: Props) {
   const pos = (e: React.PointerEvent) => {
     const canvas = canvasRef.current!;
     const rect = canvas.getBoundingClientRect();
-    return {
-      x: ((e.clientX - rect.left) / rect.width) * canvas.width,
-      y: ((e.clientY - rect.top) / rect.height) * canvas.height,
-    };
+    return toCanvasPoint(
+      { x: e.clientX - rect.left, y: e.clientY - rect.top },
+      { width: canvas.width, height: canvas.height },
+      { width: rect.width, height: rect.height },
+    );
   };
 
   const paint = (e: React.PointerEvent) => {
-    if (!painting.current) return;
+    if (!painting.current || !ready) return;
     const canvas = canvasRef.current!;
     const ctx = canvas.getContext("2d")!;
     const p = pos(e);
@@ -86,7 +92,7 @@ export default function MaskEditor({ image, onDone, onClose }: Props) {
         <div className="overflow-hidden rounded-lg border border-neutral-200 dark:border-neutral-700">
           <canvas
             ref={canvasRef}
-            className="block max-h-[420px] w-full cursor-crosshair object-contain touch-none"
+            className={`block max-h-[420px] w-full touch-none object-contain ${ready ? "cursor-crosshair" : "cursor-wait"}`}
             onPointerDown={(e) => { painting.current = true; last.current = null; paint(e); }}
             onPointerMove={paint}
             onPointerUp={() => { painting.current = false; last.current = null; }}
