@@ -9,7 +9,13 @@ pub fn db_path(app_dir: &PathBuf) -> PathBuf {
     app_dir.join("image-studio.db")
 }
 
+/// GUI 与无头 MCP 是两个进程写同一张 SQLite。WAL 只解决读写冲突，不解决写写冲突，
+/// 所以两边都必须带锁等待——超时设在 init() 里，避免"只有 MCP 设了、GUI 没设"。
+pub const BUSY_TIMEOUT_MS: u64 = 10_000;
+
 pub fn init(conn: &Connection) -> AppResult<()> {
+    // 不依赖 rusqlite 的 5s 默认值：GUI 与无头进程同时写库，统一按 BUSY_TIMEOUT_MS 排队
+    conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS))?;
     conn.execute_batch(
         r#"
         PRAGMA journal_mode = WAL;
@@ -85,4 +91,29 @@ pub fn init(conn: &Connection) -> AppResult<()> {
     // 旧库迁移：tasks 补 total 列
     let _ = conn.execute_batch("ALTER TABLE tasks ADD COLUMN total INTEGER NOT NULL DEFAULT 1;");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{init, BUSY_TIMEOUT_MS};
+    use rusqlite::Connection;
+
+    fn busy_timeout_ms(conn: &Connection) -> i64 {
+        conn.query_row("PRAGMA busy_timeout", [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn init_sets_busy_timeout_for_every_opener() {
+        // GUI 与 MCP 都只调 init：锁等待必须在 init 里，否则先启动的一方撞写锁会立刻 SQLITE_BUSY
+        let conn = Connection::open_in_memory().unwrap();
+        init(&conn).unwrap();
+        assert_eq!(busy_timeout_ms(&conn), BUSY_TIMEOUT_MS as i64);
+    }
+
+    #[test]
+    fn init_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        init(&conn).unwrap();
+        init(&conn).unwrap();
+    }
 }

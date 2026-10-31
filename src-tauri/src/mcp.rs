@@ -16,7 +16,6 @@ use std::io::{self, BufReader};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::Connection;
@@ -47,8 +46,7 @@ pub fn run_stdio() -> Result<()> {
 
     let conn = Connection::open(storage::db_path(&dir))
         .with_context(|| format!("无法打开数据库：{}", dir.display()))?;
-    // GUI 也在写同一张表（WAL 只解决读写冲突，不解决写写冲突）
-    conn.busy_timeout(Duration::from_secs(10))?;
+    // 锁等待（busy_timeout）由 storage::init 统一设置，GUI 侧走同一条路
     storage::init(&conn)?;
     let db = Db(Mutex::new(conn));
 
