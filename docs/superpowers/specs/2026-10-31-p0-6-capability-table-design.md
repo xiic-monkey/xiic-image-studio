@@ -36,7 +36,7 @@
 
 ## 3. 能力表（唯一真源）
 
-新增 `src-tauri/src/generate/capabilities.rs`：
+新增 `src-tauri/src/capabilities.rs`（放 crate 根而非 `generate/` 下：`provider/types.rs` 要用它来给 `ProviderListItem` 挂字段，放根模块可避免 provider→generate 的反向依赖）：
 
 ```rust
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -109,7 +109,7 @@ pub fn for_model(protocol: Protocol, model: &str) -> Capabilities;
 
 **midjourney_proxy**：不变（现状已不发送 size/quality/seed/mask）。
 
-### 4.2 服务端兜底（`src-tauri/src/generate/capabilities.rs`）
+### 4.2 服务端兜底（`src-tauri/src/capabilities.rs`）
 
 裁剪逻辑写成**纯函数**，便于单测；`submit_task`（`src-tauri/src/generate/commands.rs`）在构造 `GenCtx` 之前调用它，保证 MCP、重试、外部调用三条入口都发不出非法参数：
 
@@ -177,4 +177,4 @@ pub fn sanitize(caps: &Capabilities, req: &mut GenerateRequest) {
 `docs/DESIGN.md` 需同步：
 - §参数说明：`seed` 下发范围收窄为 openai_chat_image / gemini_native（`generationConfig.seed`），openai_images 不再下发。
 - 新增能力表说明与文件位置。
-- §8 目录结构补 `generate/capabilities.rs` 与 `src/lib/capabilities.ts`。
+- §8 目录结构补 `src-tauri/src/capabilities.rs` 与 `src/lib/capabilities.ts`。
