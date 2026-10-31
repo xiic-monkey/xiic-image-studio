@@ -88,6 +88,8 @@ pub struct ProviderListItem {
     pub has_key: bool,
     pub created_at: String,
     pub updated_at: String,
+    /// 该协议+模型实际接受的参数（前端据此收敛控件，适配器据此发参）
+    pub capabilities: crate::capabilities::Capabilities,
 }
 
 #[derive(Debug, Clone, Serialize)]

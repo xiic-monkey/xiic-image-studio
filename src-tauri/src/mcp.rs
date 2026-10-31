@@ -245,12 +245,33 @@ fn generate(
         (provider, key)
     };
 
+    // 按能力表裁剪：MCP 是独立入口，不经过 submit_task
+    let caps = crate::capabilities::for_model(provider.protocol, &provider.model);
+    let mut size = arguments
+        .get("size")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let mut quality = arguments
+        .get("quality")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let mut seed = arguments.get("seed").and_then(|v| v.as_u64());
+    if !caps.sizes.contains(&size.as_deref().unwrap_or("")) {
+        size = None;
+    }
+    if !caps.quality.contains(&quality.as_deref().unwrap_or("")) {
+        quality = None;
+    }
+    if !caps.seed {
+        seed = None;
+    }
+
     let request_json = json!({
         "prompt": prompt,
         "n": n,
-        "size": arguments.get("size"),
-        "quality": arguments.get("quality"),
-        "seed": arguments.get("seed"),
+        "size": size,
+        "quality": quality,
+        "seed": seed,
         "ref_count": 0,
         "source": "mcp",
     })
@@ -267,15 +288,9 @@ fn generate(
         model: provider.model.clone(),
         custom_headers: provider.custom_headers.clone(),
         prompt: prompt.clone(),
-        size: arguments
-            .get("size")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        quality: arguments
-            .get("quality")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        seed: arguments.get("seed").and_then(|v| v.as_u64()),
+        size: size.clone(),
+        quality: quality.clone(),
+        seed,
         refs: Vec::new(),
         mask: None,
         cancel: None,

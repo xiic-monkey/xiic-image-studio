@@ -24,7 +24,7 @@ pub async fn generate_submit(
 /// UI 命令与本地能力端口（bridge，供 MCP 调用）**共用这一条链路**：
 /// 外部调用产出的任务，落库、图片目录、进度事件与手动点「生成」完全一致，
 /// 所以工作台天然能看到、能实时刷新，不需要外部进程自己去写库。
-pub fn submit_task(app: &AppHandle, request: GenerateRequest) -> AppResult<String> {
+pub fn submit_task(app: &AppHandle, mut request: GenerateRequest) -> AppResult<String> {
     let db = app.state::<Db>();
     let prompt = request.prompt.trim().to_string();
     if prompt.is_empty() {
@@ -43,6 +43,10 @@ pub fn submit_task(app: &AppHandle, request: GenerateRequest) -> AppResult<Strin
         provider_db::get_key(&conn, &request.provider_id)?
             .ok_or_else(|| AppError::General("该供应商尚未保存 API Key".into()))?
     };
+
+    // 按能力表裁剪：GUI 与外部调用走同一条链路，保证发不出非法参数
+    let caps = crate::capabilities::for_model(provider.protocol, &provider.model);
+    crate::capabilities::sanitize(&caps, &mut request);
 
     let ctx = generate::types::GenCtx {
         base_url: provider.base_url.clone(),
@@ -71,6 +75,7 @@ pub fn submit_task(app: &AppHandle, request: GenerateRequest) -> AppResult<Strin
                 serde_json::json!({
                     "prompt": prompt,
                     "n": n,
+                    // 记裁剪后的值：与实际发出的参数一致，重试才能复现
                     "size": request.size,
                     "quality": request.quality,
                     "seed": request.seed,

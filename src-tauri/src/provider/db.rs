@@ -36,6 +36,8 @@ pub fn list(conn: &Connection) -> AppResult<Vec<ProviderListItem>> {
     let mut out = Vec::new();
     for item in rows {
         let (p, has_key) = item?;
+        // 先算能力再进结构体字面量：字面量里 model: p.model 会把 p.model 移走
+        let capabilities = crate::capabilities::for_model(p.protocol, &p.model);
         out.push(ProviderListItem {
             id: p.id,
             name: p.name,
@@ -46,6 +48,7 @@ pub fn list(conn: &Connection) -> AppResult<Vec<ProviderListItem>> {
             has_key,
             created_at: p.created_at,
             updated_at: p.updated_at,
+            capabilities,
         });
     }
     Ok(out)
@@ -230,5 +233,18 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         let err = encrypt_plaintext_keys(&conn).unwrap_err();
         assert!(err.to_string().contains("no such table"), "实际：{err}");
+    }
+
+    #[test]
+    fn list_items_carry_capabilities() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::storage::init(&conn).unwrap();
+        insert_provider(&conn, "p1", "sk-abcdef");
+        let items = super::list(&conn).unwrap();
+        assert_eq!(items.len(), 1);
+        // model 为空 → 走中转兜底行：OpenAI Images 不发 seed、支持蒙版
+        assert!(!items[0].capabilities.seed);
+        assert!(items[0].capabilities.mask);
+        assert_eq!(items[0].capabilities.endpoint, "images");
     }
 }
