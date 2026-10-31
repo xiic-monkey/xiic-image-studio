@@ -57,7 +57,7 @@
   - `pub fn for_model(protocol: Protocol, model: &str) -> Capabilities`
   - `pub fn sanitize(caps: &Capabilities, req: &mut GenerateRequest)`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 创建 `src-tauri/src/capabilities.rs`，只放测试模块（实现留空给 Step 3）：
 
@@ -207,13 +207,13 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cd src-tauri && cargo test capabilities`
 
 Expected: 编译失败 —— `cannot find function 'for_model' in this scope`、`cannot find type 'Protocol' in this scope` 之类——因为实现还不存在。这是预期的 RED。
 
-- [ ] **Step 3: 写实现**
+- [x] **Step 3: 写实现**
 
 在 `src-tauri/src/capabilities.rs` 中**把实现加在文件开头**（`#[cfg(test)] mod tests { … }` 保持在文件末尾，不要被实现包住）：
 
@@ -354,13 +354,13 @@ pub fn sanitize(caps: &Capabilities, req: &mut GenerateRequest) {
 pub mod capabilities;
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `cd src-tauri && cargo test capabilities`
 
 Expected: `test result: ok. 11 passed; 0 failed`
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src-tauri/src/capabilities.rs src-tauri/src/lib.rs
@@ -378,7 +378,7 @@ git commit -m "feat(capabilities): 协议×模型能力表（尺寸/质量/seed/
 - Consumes: `crate::capabilities::{for_model, Capabilities}`、`crate::provider::types::Protocol`、`crate::generate::types::{GenCtx, RefImage}`
 - Produces: 测试模块内的 helper `fn capture_server(response: &'static str) -> (String, Arc<Mutex<(String, String)>>)`（返回 base_url 与抓到的请求头/请求体）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 在 `src-tauri/src/generate/adapters.rs` 的 `mod tests` 里，把 `use` 改成：
 
@@ -517,13 +517,13 @@ mod tests {
     }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cd src-tauri && cargo test openai_images`
 
 Expected: FAIL —— `openai_images_never_sends_seed` 断言失败（实际请求体里带 `"seed":42`），`openai_images_edits_multipart_has_no_seed_field` 失败（multipart 里带 `name="seed"`），`openai_images_drops_size_not_in_capability_table` 失败（实际带上了 `2048x2048`）。
 
-- [ ] **Step 3: 写实现**
+- [x] **Step 3: 写实现**
 
 在 `src-tauri/src/generate/adapters.rs` 顶部 import 区加：
 
@@ -603,13 +603,13 @@ fn allowed(table: &[&str], value: &Option<String>) -> Option<String> {
 }
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `cd src-tauri && cargo test openai_images`
 
 Expected: PASS（3 个新用例 + 原有 3 个 adapters 用例全绿）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src-tauri/src/generate/adapters.rs
@@ -627,7 +627,7 @@ git commit -m "fix(adapter): openai images 按能力表发参，不再下发 see
 - Consumes: `crate::capabilities::{for_model, ENDPOINT_PREDICT}`、`crate::provider::types::Protocol`
 - Produces: `pub async fn gemini_predict(ctx: &GenCtx) -> AppResult<ImageOut>`（模块内私有，`gemini_native` 内部按 endpoint 分发）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 在 `src-tauri/src/generate/adapters.rs` 的 `mod tests` 里追加：
 
@@ -675,13 +675,13 @@ git commit -m "fix(adapter): openai images 按能力表发参，不再下发 see
     }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cd src-tauri && cargo test gemini`
 
 Expected: FAIL —— `gemini_puts_seed_inside_generation_config` 失败（当前 seed 在顶层、没有 `generationConfig`）；`imagen_uses_predict_endpoint_and_reads_predictions` 失败（当前走 `:generateContent`，且响应里没有 `candidates` → 报错）。
 
-- [ ] **Step 3: 写实现**
+- [x] **Step 3: 写实现**
 
 把 `gemini_native` 改成：
 
@@ -804,13 +804,13 @@ async fn gemini_predict(ctx: &GenCtx) -> AppResult<ImageOut> {
 }
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `cd src-tauri && cargo test gemini`
 
 Expected: PASS（2 个新用例通过）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src-tauri/src/generate/adapters.rs
@@ -832,7 +832,7 @@ git commit -m "fix(adapter): gemini 的 seed/size 走 generationConfig，imagen 
 - Consumes: `crate::capabilities::{for_model, sanitize, Capabilities}`
 - Produces: `ProviderListItem.capabilities: Capabilities`（序列化为 camelCase 字段 `capabilities`）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 在 `src-tauri/src/provider/db.rs` 的 `mod tests` 里追加（复用已有的 `insert_provider`，它固定写 `protocol='openai_images'`、`model=''`）：
 
@@ -851,13 +851,13 @@ git commit -m "fix(adapter): gemini 的 seed/size 走 generationConfig，imagen 
     }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cd src-tauri && cargo test list_items_carry_capabilities`
 
 Expected: 编译失败 —— `no field 'capabilities' on type 'ProviderListItem'`。
 
-- [ ] **Step 3: 写实现**
+- [x] **Step 3: 写实现**
 
 `src-tauri/src/provider/types.rs` 的 `ProviderListItem` 加字段：
 
@@ -949,13 +949,13 @@ pub fn submit_task(app: &AppHandle, mut request: GenerateRequest) -> AppResult<S
 
 并把 `request_json` 与 `GenCtx` 里的 size/quality/seed 换成这三个裁剪后的变量。
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `cd src-tauri && cargo test`
 
 Expected: 全部通过（新增 1 个用例 + 原有 30 个）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src-tauri/src/provider/types.rs src-tauri/src/provider/db.rs src-tauri/src/generate/commands.rs src-tauri/src/mcp.rs
@@ -978,7 +978,7 @@ git commit -m "feat(db): ProviderListItem 携带能力表；GUI/MCP 提交入口
   - `src/types.ts`: `export interface Capabilities { sizes: string[]; quality: string[]; seed: boolean; refs: boolean; mask: boolean; endpoint: string; sizeLabel: string; }`
   - `src/lib/capabilities.ts`: `normalizeSize(caps, current): string | undefined`、`normalizeQuality(caps, current): string | undefined`、`isSeedEnabled(caps): boolean`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 创建 `src/lib/capabilities.test.ts`：
 
@@ -1026,13 +1026,13 @@ test("种子是否可用由能力表决定", () => {
 });
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `npm test`
 
 Expected: FAIL —— `ERR_MODULE_NOT_FOUND` 找不到 `src/lib/capabilities.ts`（以及 `../types.ts` 的 `Capabilities` 类型）。
 
-- [ ] **Step 3: 写实现**
+- [x] **Step 3: 写实现**
 
 `src/types.ts` 加：
 
@@ -1083,13 +1083,13 @@ export function isSeedEnabled(caps: Capabilities): boolean {
 "test": "node --test src/lib/submission.test.ts src/lib/mask-geometry.test.ts src/lib/capabilities.test.ts"
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `npm test`
 
 Expected: `# pass 16`、`# fail 0`（原 10 个 + 新 6 个）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/types.ts src/lib/capabilities.ts src/lib/capabilities.test.ts package.json
@@ -1107,7 +1107,7 @@ git commit -m "feat(workbench): 前端能力类型契约 + 尺寸/质量/种子�
 - Consumes: `provider.capabilities`（`ProviderListItem` 字段）、`src/lib/capabilities.ts` 的三个纯函数
 - Produces: 无新导出（组件行为变化）
 
-- [ ] **Step 1: 写验收用例（浏览器实测断言表）**
+- [x] **Step 1: 写验收用例（浏览器实测断言表）**
 
 纯逻辑（尺寸回落 / 质量回落 / 种子可用性）已在 Task 5 用 `src/lib/capabilities.test.ts` 覆盖；本任务只做接线，判定靠浏览器实测。验收断言表（每行都要实际点一遍）：
 
@@ -1120,11 +1120,11 @@ git commit -m "feat(workbench): 前端能力类型契约 + 尺寸/质量/种子�
 
 附加断言：从 gpt-image-1 切到 gemini 后，尺寸控件的值必须自动从 `1024x1024` 变成 `1:1`（旧值不在新能力表内 → 回落）。
 
-- [ ] **Step 2: 记录当前行为（RED 基线）**
+- [x] **Step 2: 记录当前行为（RED 基线）**
 
 在改代码之前，按 Step 1 的表在浏览器里点一遍并记录实际表现。当前实现（所有协议共用一套固定选项、种子永不置灰、蒙版按协议而非能力判断）会让上表除「gpt-image-1 的尺寸选项」外**全部不成立**——这就是本次要修的 RED。
 
-- [ ] **Step 3: 写实现**
+- [x] **Step 3: 写实现**
 
 在 `src/views/WorkbenchView.tsx` 顶部 import 区加：
 
@@ -1230,7 +1230,7 @@ import { isSeedEnabled, normalizeQuality, normalizeSize } from "../lib/capabilit
           });
 ```
 
-- [ ] **Step 4: 验证（浏览器实测 + 构建）**
+- [x] **Step 4: 验证（浏览器实测 + 构建）**
 
 Run: `npm run build` → 期望构建通过、无 TS 报错（`tsc` 会把 `noUnusedLocals` 违规也报出来，所以残留的未用常量会在这里暴露）。
 
@@ -1241,7 +1241,7 @@ Run: `npm run build` → 期望构建通过、无 TS 报错（`tsc` 会把 `noUn
 - 蒙版入口只在 gpt-image-1 下出现（加参考图后）
 - 从 gpt-image-1 切到 gemini-2.5-flash-image 后，尺寸值从 `1024x1024` 自动变成 `1:1`
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/views/WorkbenchView.tsx
@@ -1259,7 +1259,7 @@ git commit -m "feat(workbench): 参数面板按协议×模型能力收敛，不�
 - Consumes: 前面所有任务的最终形态
 - Produces: 无代码接口
 
-- [ ] **Step 1: 更新文档**
+- [x] **Step 1: 更新文档**
 
 `docs/DESIGN.md`：
 
@@ -1300,7 +1300,7 @@ git commit -m "feat(workbench): 参数面板按协议×模型能力收敛，不�
   "协议不支持的参数"就只有一个地方能定义。
 ```
 
-- [ ] **Step 2: 全量验证**
+- [x] **Step 2: 全量验证**
 
 Run:
 ```bash
@@ -1332,7 +1332,7 @@ git diff --check
 ```
 Expected: 无输出
 
-- [ ] **Step 3: 提交**
+- [x] **Step 3: 提交**
 
 ```bash
 git add docs/DESIGN.md
