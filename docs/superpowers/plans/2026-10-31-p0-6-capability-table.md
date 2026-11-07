@@ -19,7 +19,7 @@
 - **数据库结构不变**：能力表不落库，由 `(protocol, model)` 纯函数推导。
 - **用户已确认的两项决策**：① openai_images 协议下 seed 一律不发；② imagen-* 本次实现 `:predict` 端点分支。
 - 提交时只 stage 本任务涉及的文件，禁止 `git add -A` / `git add .`。
-- 工作目录一律用仓库根 `/Users/xiic/RustroverProjects/xiic-image-studio`。
+- 工作目录一律用仓库根（相对仓库根的路径，不写本机绝对路径）。
 
 ---
 
