@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test": "node --test src/lib/submission.test.ts src/lib/mask-geometry.test.ts src/lib/capabilities.test.ts",
+    "test": "node --test src/lib/submission.test.ts src/lib/mask-geometry.test.ts src/lib/capabilities.test.ts src/lib/batch-parse.test.ts",
     "tauri": "tauri"
   },
   "dependencies": {

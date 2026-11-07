@@ -5,6 +5,7 @@ import Select from "../components/Select";
 import TaskPanel, { useTaskFeed, type TaskView } from "../components/TaskPanel";
 import { api } from "../ipc";
 import { isSeedEnabled, normalizeQuality, normalizeSize } from "../lib/capabilities";
+import { parseBatch } from "../lib/batch-parse";
 import { buildSubmissions, pickPrefillPrompt, remainingText } from "../lib/submission";
 import { usePrefill } from "../stores/prefill";
 import { useProviders } from "../stores/providers";
@@ -25,51 +26,8 @@ function fileToRef(file: File): Promise<RefImage> {
   });
 }
 
-// 批量文件解析：支持 JSONL（每行为 JSON 对象或裸提示词）/ CSV（prompt[,size,quality,seed]）/ 纯文本（每行一个提示词）。
-interface BatchItem {
-  prompt: string;
-  size?: string;
-  quality?: string;
-  seed?: string;
-  n?: string;
-}
-
-function parseBatch(text: string): BatchItem[] {
-  const lines = text.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-  const items: BatchItem[] = [];
-  for (const line of lines) {
-    if (line.startsWith("{")) {
-      try {
-        const o = JSON.parse(line);
-        const p = o.prompt ?? o.p;
-        if (p) {
-          items.push({
-            prompt: String(p),
-            size: o.size,
-            quality: o.quality,
-            seed: o.seed != null ? String(o.seed) : undefined,
-            n: o.n != null ? String(o.n) : undefined,
-          });
-        }
-      } catch {
-        items.push({ prompt: line });
-      }
-    } else if (line.toLowerCase().startsWith("prompt")) {
-      continue; // CSV 表头行
-    } else if (line.includes(",")) {
-      const [p, sz, q, sd] = line.split(",");
-      items.push({
-        prompt: (p ?? "").trim(),
-        size: sz?.trim() || undefined,
-        quality: q?.trim() || undefined,
-        seed: sd?.trim() || undefined,
-      });
-    } else {
-      items.push({ prompt: line });
-    }
-  }
-  return items.filter((i) => i.prompt);
-}
+// 批量文件解析抽在 src/lib/batch-parse.ts（纯函数 + 单测）：CSV 里的逗号、
+// 引号转义、纯文本提示词里的逗号，三种情况的切法完全不同，藏在组件里没法测。
 
 export default function WorkbenchView() {
   const { providers, load } = useProviders();
@@ -277,7 +235,7 @@ export default function WorkbenchView() {
     setSubmitting(true);
     try {
       const text = await api.readTextFile(picked);
-      const items = parseBatch(text);
+      const items = parseBatch(text, picked);
       if (items.length === 0) {
         setNotice("文件为空或无有效行");
         return;
