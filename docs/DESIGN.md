@@ -77,8 +77,9 @@ ProviderConfig {
 9. **图片工具箱**（ffmpeg sidecar）：webp/avif/png 转换、批量压缩、GIF 合成、视频抽帧做参考图、改尺寸
 10. **批量任务**：工作台「按行批量」开关（默认关）——开着时一行一个任务、每行 1 张；
     关着时整段多行文本按**一条**提示词提交，`数量`生效。换行本身不再隐含批量，
-    模板追加因此能把多段描述合成一条。另有 **JSONL/CSV 文件导入**（"导入批量"按钮，
-    支持 `prompt[,size,quality,seed]` / JSON 对象行 / 纯文本每行一提示词）。
+    模板追加因此能把多段描述合成一条。另有 **JSONL/CSV 文件导入**（"导入批量"按钮）：
+    按文件扩展名判格式（.csv / .jsonl / .txt，认不出扩展名时看内容），
+    CSV 走标准引号规则（引号内的逗号不算分隔符、`""` 是转义），纯文本整行即一条提示词。
 11. **MJ 扩展操作**：U/V 放大变换按钮（后端 `mj_action` worker + 前端 GalleryView）
 12. **预设模板库**：内置电商/头像/插画/摄影四类场景模板，工作台「模板」按钮插入（追加到提示词，可选带 size/quality）
 
@@ -124,11 +125,22 @@ ProviderConfig {
 providers   (id, name, base_url, protocol, model, custom_headers, created_at)  -- key 只存钥匙串引用
 sessions    (id, name, provider_id, draft_json, created_at)
 tasks       (id, session_id, provider_id, protocol, request_json, status,
-             error, concurrency, created_at, finished_at)
+             error, concurrency, created_at, finished_at)  -- session_id REFERENCES sessions(id) ON DELETE SET NULL
 images      (id, task_id, path, thumb_path, prompt, model, params_json,
-             favorite, width, height, size, created_at)
+             favorite, width, height, size, created_at)    -- task_id REFERENCES tasks(id) ON DELETE SET NULL（可空）
 prompts     (id, title, content, tags)
 ```
+
+- 外键是真声明的（不是只开 `PRAGMA foreign_keys`）：`tasks.session_id` → `sessions(id)`、
+  `images.task_id` → `tasks(id)`，都是 `ON DELETE SET NULL`。
+  删任务/删会话**不删**图片与任务本身——画廊里的图不该因为清任务队列就没了，
+  只是不再声称自己属于某个已删的任务。
+- 旧库没有 REFERENCES，迁移由 `storage::migrate_foreign_keys` 重建表完成
+  （SQLite 不能 ALTER TABLE 加约束）：重建在一个事务里，孤儿引用置 NULL，数据零丢失。
+  不想开 GUI 也能升级库结构：`cargo run --example migrate_db -- "<db 路径>"`。
+- 索引：`idx_images_created` / `idx_tasks_created`（列表排序）、
+  `idx_images_task`（`task_list` 回填图片、`count_done` 计数）、
+  `idx_tasks_session`（外键的 ON DELETE SET NULL 要扫子表）。
 
 ## 8. 目录结构
 
@@ -147,8 +159,9 @@ xiic-image-studio/
 │   ├── views/{Workbench,Gallery,Providers,Prompts,Tools}View.tsx
 │   ├── components/{TaskPanel,MaskEditor,ProviderForm,Select,TrafficLights}.tsx
 │   ├── stores/{prefill,providers}.ts
-│   ├── lib/{submission,mask-geometry,capabilities}.ts + 同名 .test.ts   # 纯函数（提交语义 / 蒙版几何 / 能力收敛），node --test
+│   ├── lib/{submission,mask-geometry,capabilities,batch-parse}.ts + 同名 .test.ts  # 纯函数（提交语义 / 蒙版几何 / 能力收敛 / 批量解析），node --test
 │   └── ipc.ts
+├── src-tauri/examples/{gen_icon,migrate_db}.rs  # 不依赖 GUI 的出图自检 / 库结构迁移
 └── scripts/fetch-ffmpeg.sh        # 打包前拉 ffmpeg sidecar（GitHub Release tag ffmpeg-v1）
 ```
 
@@ -159,7 +172,7 @@ xiic-image-studio/
 | **M1 骨架** | Tauri 工程 + SQLite + 布局 + Provider 管理（四协议 + 测试 + 发现） | 能配通一个中转站 |
 | **M2 生图核心** | 文生图/图生图 + 任务队列 + 本地落盘 | 中转站真实出图 |
 | **M3 画廊与工作流** | 画廊/搜索/收藏/参数回填 + 多会话 + 提示词库 | 完整日常可用 |
-| **M4 进阶** | 蒙版重绘 + ffmpeg 工具箱 + 批量任务 + MJ U/V | 功能齐（批量仅多行，文件导入待做） |
+| **M4 进阶** | 蒙版重绘 + ffmpeg 工具箱 + 批量任务 + MJ U/V | 功能齐（批量为显式开关；文件导入按扩展名判格式，CSV 支持引号字段） |
 | **M5 无头 MCP** | `--mcp` 纯 stdio，对外 `generate_image` / `list_providers` | 外部 agent 能驱动生图、结果进同一画廊 |
 
 ## 10. MCP 无头模式（已实现）
@@ -191,6 +204,13 @@ xiic-image-studio/
 - **能力表而非逐处打补丁**：协议差异多且会变（中转站、模型版本），散落在适配器里迟早再次不一致。
   收敛成一张 `(protocol, model) → Capabilities` 的纯函数表，适配器、提交入口、前端读同一份，
   "协议不支持的参数"就只有一个地方能定义。
+- **真外键而不是只开 PRAGMA**：`PRAGMA foreign_keys = ON` 在没声明 REFERENCES 的表上不起作用，
+  等于给了一层假的安全感。引用完整性要么真声明（代价是旧库要重建表迁移），
+  要么就承认没有——不能两头占。选 `ON DELETE SET NULL` 而不是级联删：
+  画廊里的图不该因为清任务队列就消失，删任务只清空归属。
+- **锁中毒不 panic**：某条命令 panic 时若正持着库锁，`Mutex` 会被毒化，
+  之后所有命令连锁 panic——一次崩溃放大成整条链路失效。
+  `Db::conn()` 在毒化时取回锁内连接继续用：毒化只说明上次崩过，不代表数据坏了。
 
 ## 12. 待办 / 已知限制
 
@@ -198,3 +218,6 @@ xiic-image-studio/
 - **seed 兼容性**：是否下发由能力表决定（openai_chat_image / gemini_native 下发，openai_images 不下发）；
   部分中转站无视该字段属正常。
 - **批量任务导出**：目前只支持导入，尚未做「把画廊/任务导出成 JSONL」的反向流水线。
+- **批量开关与蒙版涂抹的 GUI 手工验证**：底层纯函数与单测已覆盖（提交语义、蒙版几何换算），
+  但 UI 接线还没有人工点过一遍（见 `docs/superpowers/plans/2026-10-31-p0-3-p0-5-fixes.md` 里
+  仍未勾选的两步）。
