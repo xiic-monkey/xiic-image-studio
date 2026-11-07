@@ -1,5 +1,5 @@
-// crypto / error / generate / provider 设为 pub：examples/（如 gen_icon）需要
-// 复用 app 自己的生成链路（provider 配置 + 加密 key + adapters）来出图。
+// crypto / error / generate / provider / storage 设为 pub：examples/（如 gen_icon、
+// migrate_db）需要复用 app 自己的生成链路与建库迁移来出图、升级库结构。
 pub mod capabilities;
 pub mod crypto;
 pub mod error;
@@ -13,7 +13,7 @@ mod mcp_protocol;
 mod media;
 mod prompts;
 mod sessions;
-mod storage;
+pub mod storage;
 
 use gallery::{image_delete, image_list, image_reveal, image_set_favorite};
 use generate::commands::{generate_cancel, generate_submit, image_read_b64, mj_action, task_delete, task_list};
@@ -63,24 +63,18 @@ pub fn run() {
             // 只表现为「双击没反应」），但必须打到 stderr——此后每一次写库都会显式
             // 报错（见 generate::insert_image / finish_task_row），不再静默吞掉。
             if let Some(db) = app.try_state::<Db>() {
-                match db.0.lock() {
-                    Ok(conn) => {
-                        if let Err(e) = generate::reclaim_orphan_tasks(&conn) {
-                            eprintln!(
-                                "[startup] 遗留任务清理失败，任务队列可能仍显示「生成中」：{e}"
-                            );
-                        }
-                        match provider_db::encrypt_plaintext_keys(&conn) {
-                            Ok(0) => {}
-                            Ok(n) => eprintln!("[startup] 已把 {n} 个明文 API Key 加密回写"),
-                            Err(e) => {
-                                eprintln!("[startup] API Key 加密回写失败（下次启动会重试）：{e}")
-                            }
-                        }
+                // db.conn() 不会因锁被毒化而 panic：毒化只说明之前的线程崩过，
+                // 库连接本身还能用，直接 unwrap 会让这次启动后的每个命令都跟着崩。
+                let conn = db.conn();
+                if let Err(e) = generate::reclaim_orphan_tasks(&conn) {
+                    eprintln!("[startup] 遗留任务清理失败，任务队列可能仍显示「生成中」：{e}");
+                }
+                match provider_db::encrypt_plaintext_keys(&conn) {
+                    Ok(0) => {}
+                    Ok(n) => eprintln!("[startup] 已把 {n} 个明文 API Key 加密回写"),
+                    Err(e) => {
+                        eprintln!("[startup] API Key 加密回写失败（下次启动会重试）：{e}")
                     }
-                    Err(e) => eprintln!(
-                        "[startup] 数据库互斥锁已损坏（启动时另一个线程 panic 过）：{e}"
-                    ),
                 }
             }
 

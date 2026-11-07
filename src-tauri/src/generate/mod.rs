@@ -39,6 +39,12 @@ impl QueueState {
             inflight: Arc::new(tokio::sync::Semaphore::new(MAX_GLOBAL_INFLIGHT)),
         }
     }
+
+    /// 取取消标志表。锁被毒化（之前有线程持锁时 panic）不直接 panic：
+    /// 取消表本身没坏，毒化只说明那次崩溃发生在持锁期间。
+    pub fn cancels(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<AtomicBool>>> {
+        self.cancels.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 pub(crate) fn images_dir(app: &AppHandle) -> AppResult<PathBuf> {
@@ -141,7 +147,7 @@ pub(crate) fn count_done(conn: &rusqlite::Connection, task_id: &str) -> u32 {
 
 pub(crate) fn emit_progress(app: &AppHandle, db: &Db, task_id: &str, status: &str, error: Option<String>, image: Option<ImageMeta>) {
     let (done, total) = {
-        let conn = db.0.lock().unwrap();
+        let conn = db.conn();
         let done = count_done(&conn, task_id);
         let total: u32 = conn
             .query_row("SELECT total FROM tasks WHERE id = ?1", params![task_id], |r| r.get(0))
@@ -163,7 +169,7 @@ pub(crate) fn emit_progress(app: &AppHandle, db: &Db, task_id: &str, status: &st
 
 pub(crate) fn finish_task(app: &AppHandle, db: &Db, task_id: &str, status: &str, error: Option<String>) {
     let result = {
-        let conn = db.0.lock().unwrap();
+        let conn = db.conn();
         finish_task_row(&conn, task_id, status, error.clone())
     };
     match result {
@@ -298,7 +304,7 @@ pub(crate) async fn run_one_core(
                 }
                 let params_json = params_val.to_string();
                 let inserted = {
-                    let conn = db.0.lock().unwrap();
+                    let conn = db.conn();
                     insert_image(
                         &conn,
                         &NewImage {
@@ -415,11 +421,7 @@ pub fn spawn_task(
 ) {
     let queue = app.state::<QueueState>();
     let cancel = Arc::new(AtomicBool::new(false));
-    queue
-        .cancels
-        .lock()
-        .unwrap()
-        .insert(task_id.clone(), cancel.clone());
+    queue.cancels().insert(task_id.clone(), cancel.clone());
     drop(queue);
 
     tauri::async_runtime::spawn(async move {
@@ -465,7 +467,7 @@ pub fn spawn_task(
         finish_task(&app, &db, &task_id, status, first_err);
 
         let queue = app.state::<QueueState>();
-        queue.cancels.lock().unwrap().remove(&task_id);
+        queue.cancels().remove(&task_id);
     });
 }
 
@@ -501,10 +503,10 @@ mod tests {
     use crate::error::AppError;
     use rusqlite::{params, Connection};
 
-    fn sample<'a>(id: &'a str) -> NewImage<'a> {
+    fn sample<'a>(id: &'a str, task_id: &'a str) -> NewImage<'a> {
         NewImage {
             id,
-            task_id: "task-1",
+            task_id,
             path: "/tmp/images/task-1/00-id.png",
             thumb_path: "/tmp/images/task-1/00-id.thumb.jpg",
             prompt: "一只猫",
@@ -529,7 +531,8 @@ mod tests {
     fn image_insert_writes_a_row() {
         let conn = Connection::open_in_memory().unwrap();
         crate::storage::init(&conn).unwrap();
-        insert_image(&conn, &sample("img-1")).unwrap();
+        mark_running(&conn, "task-1");
+        insert_image(&conn, &sample("img-1", "task-1")).unwrap();
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM images", [], |r| r.get(0))
             .unwrap();
@@ -537,11 +540,23 @@ mod tests {
     }
 
     #[test]
+    fn image_insert_without_parent_task_is_rejected() {
+        // images.task_id 是真外键：任务行没建就想入库图片，数据库直接拒
+        let conn = Connection::open_in_memory().unwrap();
+        crate::storage::init(&conn).unwrap();
+        let err = insert_image(&conn, &sample("img-x", "no-such-task")).unwrap_err();
+        assert!(
+            err.to_string().contains("FOREIGN KEY"),
+            "外键必须拦得住，实际：{err}"
+        );
+    }
+
+    #[test]
     fn image_insert_failure_is_db_error_and_not_retryable() {
         // 没建表：模拟"图片已落盘但入库失败"。这条错误必须冒出来，
         // 否则文件在磁盘上、画廊里看不见，用户以为图没生成。
         let conn = Connection::open_in_memory().unwrap();
-        let err = insert_image(&conn, &sample("img-2")).unwrap_err();
+        let err = insert_image(&conn, &sample("img-2", "task-1")).unwrap_err();
         assert!(matches!(err, AppError::Db(_)), "实际：{err}");
         assert!(!err.is_retryable(), "重试整条 adapter 会重复扣费，入库失败一律不可重试");
     }
@@ -589,13 +604,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::storage::init(&conn).unwrap();
         mark_running(&conn, "t-partial");
-        insert_image(&conn, &sample("img-partial")).unwrap();
-        // sample() 把图片挂在 task-1 上，这里改挂到刚建的 running 任务下
-        conn.execute(
-            "UPDATE images SET task_id = 't-partial' WHERE id = 'img-partial'",
-            [],
-        )
-        .unwrap();
+        insert_image(&conn, &sample("img-partial", "t-partial")).unwrap();
         let n = reclaim_orphan_tasks(&conn).unwrap();
         assert_eq!(n, 1);
         let (status, error): (String, String) = conn
