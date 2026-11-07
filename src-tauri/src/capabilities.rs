@@ -48,20 +48,22 @@ pub fn for_model(protocol: Protocol, model: &str) -> Capabilities {
     let m = normalize_model(model);
     match protocol {
         Protocol::OpenAiImages => {
-            let (sizes, quality) = if m.starts_with("dall-e-3") {
-                (DALL_E3_SIZES, DALL_E3_QUALITY)
+            // DALL·E 3 没有 edits 端点（只有 dall-e-2 和 gpt-image-1 支持图生图/蒙版），
+            // 带参考图打到 /v1/images/edits 会被上游 400。
+            let (sizes, quality, refs, mask) = if m.starts_with("dall-e-3") {
+                (DALL_E3_SIZES, DALL_E3_QUALITY, false, false)
             } else if m.starts_with("gpt-image") {
-                (GPT_IMAGE_SIZES, GPT_IMAGE_QUALITY)
+                (GPT_IMAGE_SIZES, GPT_IMAGE_QUALITY, true, true)
             } else {
-                (RELAY_SIZES, GPT_IMAGE_QUALITY)
+                (RELAY_SIZES, GPT_IMAGE_QUALITY, true, true)
             };
             Capabilities {
                 sizes,
                 quality,
                 // Images API 规范里没有 seed 字段，官方与转 OpenAI 的中转站都会 400
                 seed: false,
-                refs: true,
-                mask: true,
+                refs,
+                mask,
                 endpoint: ENDPOINT_IMAGES,
                 size_label: "尺寸",
             }
@@ -165,6 +167,18 @@ mod tests {
         assert!(c.sizes.contains(&"1792x1024"));
         assert!(c.sizes.contains(&"1024x1792"));
         assert_eq!(c.quality, &["standard", "hd"][..]);
+    }
+
+    #[test]
+    fn dall_e3_has_no_edits_endpoint() {
+        let c = for_model(Protocol::OpenAiImages, "dall-e-3");
+        assert!(!c.refs && !c.mask, "DALL·E 3 不支持 /v1/images/edits");
+    }
+
+    #[test]
+    fn dall_e2_and_gpt_image_support_edits() {
+        assert!(for_model(Protocol::OpenAiImages, "dall-e-2").mask);
+        assert!(for_model(Protocol::OpenAiImages, "gpt-image-1").refs);
     }
 
     #[test]
