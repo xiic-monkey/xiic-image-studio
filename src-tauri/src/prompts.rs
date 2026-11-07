@@ -15,7 +15,7 @@ pub struct PromptItem {
 
 #[tauri::command]
 pub fn prompt_list(db: State<Db>) -> AppResult<Vec<PromptItem>> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.conn();
     let mut stmt = conn.prepare(
         "SELECT id, title, content, tags, created_at FROM prompts ORDER BY created_at DESC",
     )?;
@@ -47,7 +47,7 @@ pub fn prompt_save(db: State<Db>, prompt: PromptSaveInput) -> AppResult<String> 
     let now = chrono::Utc::now().to_rfc3339();
     let tags_json = serde_json::to_string(&prompt.tags).unwrap_or_default();
     let id = prompt.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let conn = db.0.lock().unwrap();
+    let conn = db.conn();
     let exists: Option<String> = conn
         .query_row("SELECT id FROM prompts WHERE id = ?1", params![id], |r| r.get(0))
         .optional()?;
@@ -67,7 +67,7 @@ pub fn prompt_save(db: State<Db>, prompt: PromptSaveInput) -> AppResult<String> 
 
 #[tauri::command]
 pub fn prompt_delete(db: State<Db>, id: String) -> AppResult<()> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.conn();
     conn.execute("DELETE FROM prompts WHERE id = ?1", params![id])?;
     Ok(())
 }

@@ -45,7 +45,7 @@ pub fn image_list(
     limit: Option<u32>,
     offset: Option<u32>,
 ) -> AppResult<Vec<GalleryItem>> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.conn();
     let mut sql = String::from(
         "SELECT id, path, thumb_path, prompt, model, favorite, width, height, size, params_json, created_at FROM images WHERE 1=1",
     );
@@ -76,7 +76,7 @@ pub fn image_list(
 
 #[tauri::command]
 pub fn image_set_favorite(db: State<Db>, id: String, favorite: bool) -> AppResult<()> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.conn();
     conn.execute(
         "UPDATE images SET favorite = ?2 WHERE id = ?1",
         params![id, favorite as i64],
@@ -87,7 +87,7 @@ pub fn image_set_favorite(db: State<Db>, id: String, favorite: bool) -> AppResul
 #[tauri::command]
 pub fn image_delete(db: State<Db>, id: String) -> AppResult<()> {
     let (path, thumb) = {
-        let conn = db.0.lock().unwrap();
+        let conn = db.conn();
         let found: Option<(String, Option<String>)> = conn
             .query_row(
                 "SELECT path, thumb_path FROM images WHERE id = ?1",
@@ -109,7 +109,7 @@ pub fn image_delete(db: State<Db>, id: String) -> AppResult<()> {
 #[tauri::command]
 pub fn image_reveal(app: AppHandle, id: String, db: State<Db>) -> AppResult<()> {
     use tauri_plugin_opener::OpenerExt;
-    let conn = db.0.lock().unwrap();
+    let conn = db.conn();
     let path: String = conn
         .query_row("SELECT path FROM images WHERE id = ?1", params![id], |r| r.get(0))
         .optional()?

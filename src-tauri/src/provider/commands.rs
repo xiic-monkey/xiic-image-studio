@@ -7,19 +7,19 @@ use tauri::State;
 
 #[tauri::command]
 pub fn provider_list(db: State<Db>) -> AppResult<Vec<ProviderListItem>> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.conn();
     db::list(&conn)
 }
 
 #[tauri::command]
 pub async fn provider_save(db: State<'_, Db>, provider: SaveInput) -> AppResult<()> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.conn();
     db::save(&conn, &provider)
 }
 
 #[tauri::command]
 pub async fn provider_delete(db: State<'_, Db>, id: String) -> AppResult<()> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.conn();
     db::delete(&conn, &id)
 }
 
@@ -44,7 +44,7 @@ fn resolve_key(db: &State<Db>, draft: &ProviderDraft) -> AppResult<String> {
         return Ok(draft.api_key.trim().to_string());
     }
     if let Some(id) = &draft.id {
-        let conn = db.0.lock().unwrap();
+        let conn = db.conn();
         if let Some(k) = db::get_key(&conn, id)? {
             return Ok(k);
         }

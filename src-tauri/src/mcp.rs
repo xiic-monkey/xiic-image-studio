@@ -152,7 +152,7 @@ fn call_tool(
     match name.as_str() {
         "list_providers" => {
             let items = {
-                let conn = db.0.lock().unwrap();
+                let conn = db.conn();
                 provider_db::list(&conn)?
             };
             let text = if items.is_empty() {
@@ -214,7 +214,7 @@ fn generate(
 
     // 选 provider：名称或 id 都接受，不给就用第一个配好 key 的
     let (provider, key) = {
-        let conn = db.0.lock().unwrap();
+        let conn = db.conn();
         let items = provider_db::list(&conn)?;
         if items.is_empty() {
             bail!("还没有配置任何 provider，请先在 image-studio 应用里添加一个");
@@ -278,7 +278,7 @@ fn generate(
     .to_string();
 
     let task_id = {
-        let conn = db.0.lock().unwrap();
+        let conn = db.conn();
         generate::create_task(&conn, &provider.id, provider.protocol.as_str(), &request_json, n)?
     };
 
@@ -352,7 +352,7 @@ fn generate(
     // 写库失败不再静默：一张图都没有时直接报错；图已经到手却只是 tasks 行没更新，
     // 那就把原因放进 warning——不能因为记账失败把已生成（已扣费）的图丢回给用户。
     let db_error = {
-        let conn = db.0.lock().unwrap();
+        let conn = db.conn();
         finish_task_row(&conn, &task_id, status, errors.first().cloned()).err()
     };
 

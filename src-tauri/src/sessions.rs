@@ -14,7 +14,7 @@ pub struct SessionItem {
 
 #[tauri::command]
 pub fn session_list(db: State<Db>) -> AppResult<Vec<SessionItem>> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.conn();
     let mut stmt = conn.prepare(
         // 按创建时间升序：新会话永远排在最右（浏览器 tab 语义）。
         // 不用 updated_at——草稿自动保存会频繁 UPDATE，tab 顺序会跳动。
@@ -47,7 +47,7 @@ pub struct SessionSaveInput {
 pub fn session_save(db: State<Db>, session: SessionSaveInput) -> AppResult<String> {
     let now = chrono::Utc::now().to_rfc3339();
     let id = session.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let conn = db.0.lock().unwrap();
+    let conn = db.conn();
     let exists: Option<String> = conn
         .query_row("SELECT id FROM sessions WHERE id = ?1", params![id], |r| r.get(0))
         .optional()?;
@@ -81,7 +81,7 @@ pub fn session_save(db: State<Db>, session: SessionSaveInput) -> AppResult<Strin
 
 #[tauri::command]
 pub fn session_delete(db: State<Db>, id: String) -> AppResult<()> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.conn();
     conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
     Ok(())
 }

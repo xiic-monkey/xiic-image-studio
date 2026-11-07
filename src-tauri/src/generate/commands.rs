@@ -34,12 +34,12 @@ pub fn submit_task(app: &AppHandle, mut request: GenerateRequest) -> AppResult<S
 
     // 解析供应商
     let provider = {
-        let conn = db.0.lock().unwrap();
+        let conn = db.conn();
         provider_db::get(&conn, &request.provider_id)?
             .ok_or_else(|| AppError::General("供应商不存在".into()))?
     };
     let key = {
-        let conn = db.0.lock().unwrap();
+        let conn = db.conn();
         provider_db::get_key(&conn, &request.provider_id)?
             .ok_or_else(|| AppError::General("该供应商尚未保存 API Key".into()))?
     };
@@ -64,7 +64,7 @@ pub fn submit_task(app: &AppHandle, mut request: GenerateRequest) -> AppResult<S
 
     let task_id = uuid::Uuid::new_v4().to_string();
     {
-        let conn = db.0.lock().unwrap();
+        let conn = db.conn();
         conn.execute(
             "INSERT INTO tasks (id, session_id, provider_id, protocol, request_json, status, concurrency, total, created_at)
              VALUES (?1, NULL, ?2, ?3, ?4, 'running', ?5, ?5, ?6)",
@@ -102,14 +102,14 @@ pub fn submit_task(app: &AppHandle, mut request: GenerateRequest) -> AppResult<S
 
 #[tauri::command]
 pub fn generate_cancel(queue: State<QueueState>, task_id: String) {
-    if let Some(flag) = queue.cancels.lock().unwrap().get(&task_id) {
+    if let Some(flag) = queue.cancels().get(&task_id) {
         flag.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
 #[tauri::command]
 pub fn task_list(db: State<Db>, limit: Option<u32>) -> AppResult<Vec<TaskItem>> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.conn();
     let limit = limit.unwrap_or(50).clamp(1, 500);
     let mut stmt = conn.prepare(
         "SELECT t.id, t.provider_id, t.protocol, t.status,
@@ -181,9 +181,11 @@ pub fn task_list(db: State<Db>, limit: Option<u32>) -> AppResult<Vec<TaskItem>> 
 
 /// 从任务队列删除一条任务记录（仅删 tasks 表，不影响已生成的图片/gallery）。
 /// 主要用于清理已取消/失败/完成的任务。
+/// 图片仍在画廊里，但 `images.task_id` 会被外键置空（ON DELETE SET NULL）——
+/// 不再声称自己属于这个已删的任务。
 #[tauri::command]
 pub fn task_delete(db: State<Db>, id: String) -> AppResult<()> {
-    let conn = db.0.lock().unwrap();
+    let conn = db.conn();
     conn.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
     Ok(())
 }
@@ -201,7 +203,7 @@ pub async fn mj_action(
         return Err(AppError::General("command 仅支持 U1-U4 / V1-V4".into()));
     }
     let (mj_task_id, provider_id) = {
-        let conn = db.0.lock().unwrap();
+        let conn = db.conn();
         let row: Option<(String, String)> = conn
             .query_row(
                 "SELECT params_json, task_id FROM images WHERE id = ?1",
@@ -220,19 +222,19 @@ pub async fn mj_action(
         (mj_task_id, provider_id)
     };
     let provider = {
-        let conn = db.0.lock().unwrap();
+        let conn = db.conn();
         provider_db::get(&conn, &provider_id)?
             .ok_or_else(|| AppError::General("原供应商已被删除".into()))?
     };
     let key = {
-        let conn = db.0.lock().unwrap();
+        let conn = db.conn();
         provider_db::get_key(&conn, &provider_id)?
             .ok_or_else(|| AppError::General("供应商缺少 API Key".into()))?
     };
 
     let task_id = uuid::Uuid::new_v4().to_string();
     {
-        let conn = db.0.lock().unwrap();
+        let conn = db.conn();
         conn.execute(
             "INSERT INTO tasks (id, session_id, provider_id, protocol, request_json, status, concurrency, total, created_at)
              VALUES (?1, NULL, ?2, 'midjourney_proxy', ?3, 'running', 1, 1, ?4)",
@@ -355,7 +357,7 @@ async fn mj_action_worker(
             let params_json =
                 serde_json::json!({"mj_task_id": new_mj_id, "action": command}).to_string();
             let inserted = {
-                let conn = db.0.lock().unwrap();
+                let conn = db.conn();
                 generate::insert_image(
                     &conn,
                     &generate::NewImage {
