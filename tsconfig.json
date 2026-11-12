@@ -16,5 +16,9 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  // 测试文件由 `node --test` 跑（Node 原生 TS 类型擦除，不做类型检查），
+  // 也不进 vite 构建。它们 import node:test / node:assert，需要 @types/node；
+  // 而本项目约定零新增 npm 依赖，所以不把它们纳入 tsc 的检查范围。
+  "exclude": ["src/**/*.test.ts"]
 }

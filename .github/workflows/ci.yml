@@ -25,6 +25,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+      - name: Fetch ffmpeg sidecar
+        # Tauri 构建脚本要求 externalBin 指向的文件存在，而 ffmpeg 按设计不在 git 里
+        # （43MB 平台专属二进制），只能从 GitHub Release 拉。干净 checkout 下不拉，
+        # cargo 任何命令都会在 build script 阶段挂掉。
+        # working-directory 覆盖成仓库根：脚本按仓库根的相对路径写 src-tauri/binaries。
+        working-directory: .
+        run: ./scripts/fetch-ffmpeg.sh
       - name: Format
         run: cargo fmt --check
       - name: Clippy
