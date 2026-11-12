@@ -4,8 +4,17 @@ use crate::generate::types::{GenCtx, ImageOut};
 use crate::provider::types::Protocol;
 use base64::Engine;
 use serde_json::{json, Value};
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use super::client::{apply_headers, http_client, image_client, join_url};
+
+/// 测试里把轮询间隔压成 0，避免每个用例空等 3 秒。
+#[cfg(test)]
+const MJ_POLL_INTERVAL: Duration = Duration::ZERO;
+#[cfg(not(test))]
+const MJ_POLL_INTERVAL: Duration = Duration::from_secs(3);
+const MJ_POLL_TIMES: usize = 100;
 
 fn b64_decode(s: &str) -> AppResult<Vec<u8>> {
     base64::engine::general_purpose::STANDARD
@@ -413,6 +422,44 @@ async fn gemini_predict(ctx: &GenCtx) -> AppResult<ImageOut> {
 
 // ---------- Midjourney Proxy ----------
 
+/// imagine 与 U/V 共用的轮询段。统一走 send_json，非 2xx 才不会被
+/// 解析成 "error decoding response body" 这种看不懂的报错。
+async fn poll_mj_task(
+    client: &reqwest::Client,
+    base_url: &str,
+    task_id: &str,
+    ctx: &GenCtx,
+) -> AppResult<ImageOut> {
+    let fetch_url = join_url(base_url, &format!("/mj/task/{task_id}/fetch"));
+    for _ in 0..MJ_POLL_TIMES {
+        tokio::time::sleep(MJ_POLL_INTERVAL).await;
+        if let Some(flag) = &ctx.cancel {
+            if flag.load(Ordering::Relaxed) {
+                return Err(AppError::General("已取消".into()));
+            }
+        }
+        let rb = apply_headers(client.get(&fetch_url).bearer_auth(&ctx.key), &ctx.custom_headers);
+        let status: Value = send_json(rb).await?;
+        match status["status"].as_str().unwrap_or("") {
+            "SUCCESS" => {
+                let img_url = status["imageUrl"]
+                    .as_str()
+                    .or_else(|| status["image_url"].as_str())
+                    .ok_or_else(|| AppError::Fetch("MJ 成功但无 imageUrl".into()))?;
+                return download_url(img_url).await;
+            }
+            "FAILURE" => {
+                return Err(AppError::General(format!(
+                    "MJ 任务失败: {}",
+                    status["failReason"].as_str().unwrap_or("未知原因")
+                )));
+            }
+            _ => continue,
+        }
+    }
+    Err(AppError::General("MJ 任务超时（5 分钟）".into()))
+}
+
 pub async fn midjourney_proxy(ctx: &GenCtx) -> AppResult<ImageOut> {
     let client = http_client();
     let url = join_url(&ctx.base_url, "/mj/submit/imagine");
@@ -432,41 +479,37 @@ pub async fn midjourney_proxy(ctx: &GenCtx) -> AppResult<ImageOut> {
         .as_str()
         .ok_or_else(|| AppError::General("MJ 未返回任务 id".into()))?;
 
-    // 轮询最多 5 分钟
-    let fetch_url = join_url(&ctx.base_url, &format!("/mj/task/{task_id}/fetch"));
-    for _ in 0..100 {
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        if let Some(flag) = &ctx.cancel {
-            if flag.load(std::sync::atomic::Ordering::Relaxed) {
-                return Err(AppError::General("已取消".into()));
-            }
-        }
-        let rb = apply_headers(client.get(&fetch_url).bearer_auth(&ctx.key), &ctx.custom_headers);
-        let status: Value = send_json(rb).await?;
-        let st = status["status"].as_str().unwrap_or("");
-        match st {
-            "SUCCESS" => {
-                let img_url = status["imageUrl"]
-                    .as_str()
-                    .or_else(|| status["image_url"].as_str())
-                    .ok_or_else(|| AppError::Fetch("MJ 成功但无 imageUrl".into()))?;
-                let mut out = download_url(img_url).await?;
-                out.meta = Some(json!({
-                    "mj_task_id": task_id,
-                    "mj_status_url": format!("/mj/task/{task_id}/fetch"),
-                }));
-                return Ok(out);
-            }
-            "FAILURE" => {
-                return Err(AppError::General(format!(
-                    "MJ 任务失败: {}",
-                    status["failReason"].as_str().unwrap_or("未知原因")
-                )));
-            }
-            _ => continue,
-        }
+    let mut out = poll_mj_task(&client, &ctx.base_url, task_id, ctx).await?;
+    out.meta = Some(json!({
+        "mj_task_id": task_id,
+        "mj_status_url": format!("/mj/task/{task_id}/fetch"),
+    }));
+    Ok(out)
+}
+
+/// MJ U/V 放大变换。走与 imagine 相同的提交/轮询/下载链路，
+/// meta 里必须带回新的 mj_task_id，画廊才能对结果图继续做 U/V。
+pub async fn midjourney_action(ctx: &GenCtx, mj_task_id: &str, command: &str) -> AppResult<ImageOut> {
+    let client = http_client();
+    let url = join_url(&ctx.base_url, "/mj/submit/action");
+    let rb = apply_headers(client.post(&url).bearer_auth(&ctx.key), &ctx.custom_headers);
+    let resp: Value = send_json(rb.json(&json!({"taskId": mj_task_id, "command": command}))).await?;
+    if resp["code"].as_i64() != Some(1) && resp["code"].as_str() != Some("1") {
+        return Err(AppError::General(format!(
+            "MJ action 提交失败: {}",
+            resp.to_string().chars().take(300).collect::<String>()
+        )));
     }
-    Err(AppError::General("MJ 任务超时（5 分钟）".into()))
+    let new_mj_id = resp["result"]
+        .as_str()
+        .ok_or_else(|| AppError::General("MJ action 未返回任务 id".into()))?;
+
+    let mut out = poll_mj_task(&client, &ctx.base_url, new_mj_id, ctx).await?;
+    out.meta = Some(json!({
+        "mj_task_id": new_mj_id,
+        "action": command,
+    }));
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -556,6 +599,69 @@ mod tests {
             );
             let _ = stream.write_all(resp.as_bytes());
             let _ = stream.flush();
+        });
+        (format!("http://{addr}"), sink)
+    }
+
+    /// 按顺序回 N 条响应，并把每次请求的头部与请求体都记下来。
+    fn capture_server_n(
+        responses: Vec<(u16, &'static str)>,
+    ) -> (String, Arc<Mutex<Vec<(String, String)>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let out = sink.clone();
+        std::thread::spawn(move || {
+            for (status, body) in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buf: Vec<u8> = Vec::new();
+                let mut tmp = [0u8; 4096];
+                let mut header_end = 0usize;
+                while header_end == 0 {
+                    let n = stream.read(&mut tmp).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&tmp[..n]);
+                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        header_end = pos + 4;
+                    }
+                }
+                let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
+                let content_length = head
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                while buf.len() < header_end + content_length {
+                    let n = stream.read(&mut tmp).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&tmp[..n]);
+                }
+                let end = (header_end + content_length).min(buf.len());
+                out.lock()
+                    .unwrap()
+                    .push((head, String::from_utf8_lossy(&buf[header_end..end]).to_string()));
+                let reason = match status {
+                    200 => "OK",
+                    500 => "Internal Server Error",
+                    _ => "Error",
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+            }
         });
         (format!("http://{addr}"), sink)
     }
@@ -715,5 +821,60 @@ mod tests {
         let url = serve_images(vec![(500, "temporary"), (200, "image-bytes")]);
         let out = download_url(&url).await.expect("download should retry the 500");
         assert_eq!(out.bytes, b"image-bytes");
+    }
+
+    #[tokio::test]
+    async fn mj_action_posts_and_polls_with_meta() {
+        let (base, cap) = capture_server_n(vec![
+            (200, r#"{"code":1,"result":"new-mj"}"#),
+            (200, r#"{"status":"SUCCESS","imageUrl":"data:image/png;base64,aGk="}"#),
+        ]);
+        let out = super::midjourney_action(&ctx(base, "midjourney"), "old-mj", "U1")
+            .await
+            .unwrap();
+        let reqs = cap.lock().unwrap().clone();
+        assert_eq!(reqs.len(), 2, "提交 + 轮询各一次");
+        assert!(reqs[0].0.starts_with("POST /mj/submit/action"), "实际：{}", reqs[0].0);
+        assert!(reqs[0].1.contains(r#""taskId":"old-mj""#), "实际：{}", reqs[0].1);
+        assert!(reqs[0].1.contains(r#""command":"U1""#), "实际：{}", reqs[0].1);
+        assert!(reqs[1].0.starts_with("GET /mj/task/new-mj/fetch"), "实际：{}", reqs[1].0);
+        assert_eq!(out.bytes, b"hi");
+        let meta = out.meta.expect("放大图必须带上新的 mj_task_id 才能继续 U/V");
+        assert_eq!(meta["mj_task_id"], "new-mj");
+        assert_eq!(meta["action"], "U1");
+    }
+
+    #[tokio::test]
+    async fn mj_action_propagates_non_2xx_status() {
+        let (base, _) = capture_server_n(vec![(500, r#"{"error":{"message":"boom"}}"#)]);
+        let err = super::midjourney_action(&ctx(base, "midjourney"), "old", "U1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::error::AppError::Status(500, _)), "实际：{err}");
+    }
+
+    #[tokio::test]
+    async fn mj_action_reports_task_failure() {
+        let (base, _) = capture_server_n(vec![
+            (200, r#"{"code":1,"result":"new-mj"}"#),
+            (200, r#"{"status":"FAILURE","failReason":"blocked"}"#),
+        ]);
+        let err = super::midjourney_action(&ctx(base, "midjourney"), "old", "U1")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("blocked"), "实际：{err}");
+    }
+
+    #[tokio::test]
+    async fn imagine_still_polls_and_returns_mj_task_id() {
+        let (base, cap) = capture_server_n(vec![
+            (200, r#"{"code":1,"result":"t1"}"#),
+            (200, r#"{"status":"SUCCESS","imageUrl":"data:image/png;base64,aGk="}"#),
+        ]);
+        let out = super::midjourney_proxy(&ctx(base, "midjourney")).await.unwrap();
+        let reqs = cap.lock().unwrap().clone();
+        assert!(reqs[0].0.starts_with("POST /mj/submit/imagine"), "实际：{}", reqs[0].0);
+        assert!(reqs[1].0.starts_with("GET /mj/task/t1/fetch"), "实际：{}", reqs[1].0);
+        assert_eq!(out.meta.unwrap()["mj_task_id"], "t1");
     }
 }

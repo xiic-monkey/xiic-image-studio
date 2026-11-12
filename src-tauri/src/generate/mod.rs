@@ -1,6 +1,7 @@
 pub mod adapters;
 pub mod client;
 pub mod commands;
+pub mod pipeline;
 pub mod types;
 
 use crate::error::{AppError, AppResult};
@@ -8,11 +9,10 @@ use crate::generate::types::*;
 use crate::provider::types::Protocol;
 use crate::storage::Db;
 use base64::Engine;
-use futures::stream::{self, StreamExt};
 use rusqlite::params;
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -55,17 +55,23 @@ pub(crate) fn images_dir(app: &AppHandle) -> AppResult<PathBuf> {
         .join("images"))
 }
 
-fn dispatch_adapter(ctx: &GenCtx, protocol: Protocol) -> Pin<Box<dyn Future<Output = AppResult<ImageOut>> + Send + '_>> {
-    match protocol {
-        Protocol::OpenAiImages => Box::pin(adapters::openai_images(ctx)),
-        Protocol::OpenAiChatImage => Box::pin(adapters::openai_chat_image(ctx)),
-        Protocol::GeminiNative => Box::pin(adapters::gemini_native(ctx)),
-        Protocol::MidjourneyProxy => Box::pin(adapters::midjourney_proxy(ctx)),
+fn dispatch_producer<'a>(
+    ctx: &'a GenCtx,
+    producer: &'a ImageProducer,
+) -> Pin<Box<dyn Future<Output = AppResult<ImageOut>> + Send + 'a>> {
+    match producer {
+        ImageProducer::Protocol(Protocol::OpenAiImages) => Box::pin(adapters::openai_images(ctx)),
+        ImageProducer::Protocol(Protocol::OpenAiChatImage) => Box::pin(adapters::openai_chat_image(ctx)),
+        ImageProducer::Protocol(Protocol::GeminiNative) => Box::pin(adapters::gemini_native(ctx)),
+        ImageProducer::Protocol(Protocol::MidjourneyProxy) => Box::pin(adapters::midjourney_proxy(ctx)),
+        ImageProducer::MjAction { mj_task_id, command } => {
+            Box::pin(adapters::midjourney_action(ctx, mj_task_id, command))
+        }
     }
 }
 
 pub(crate) fn save_image(
-    dir: &PathBuf,
+    dir: &Path,
     task_id: &str,
     index: u32,
     out: &ImageOut,
@@ -197,47 +203,6 @@ async fn wait_cancel(cancel: &Arc<AtomicBool>) {
     }
 }
 
-async fn run_one(
-    app: AppHandle,
-    task_id: String,
-    index: u32,
-    _total: u32,
-    protocol: Protocol,
-    ctx: GenCtx,
-    prompt: String,
-    model: String,
-    cancel: Arc<AtomicBool>,
-) -> AppResult<()> {
-    let db = app.state::<Db>();
-    let inflight = app.state::<QueueState>().inflight.clone();
-    let dir = images_dir(&app)?;
-    match run_one_core(
-        &db,
-        &dir,
-        &task_id,
-        protocol,
-        &ctx,
-        index,
-        &prompt,
-        &model,
-        cancel,
-        Some(inflight),
-    )
-    .await
-    {
-        Ok(Some(meta)) => {
-            emit_progress(&app, &db, &task_id, "running", None, Some(meta));
-            Ok(())
-        }
-        // 取消不算错误：spawn_task 会把它汇总成 canceled
-        Ok(None) => Ok(()),
-        Err(e) => {
-            emit_progress(&app, &db, &task_id, "running", Some(e.to_string()), None);
-            Err(e)
-        }
-    }
-}
-
 /// 生成一张图并落库——**不依赖 AppHandle**，UI 任务队列与无头 MCP 模式共用。
 ///
 /// 两边唯一差别：UI 侧额外 emit 进度事件、走全局并发闸门；无头侧传 `None`
@@ -248,9 +213,9 @@ async fn run_one(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_one_core(
     db: &Db,
-    dir: &PathBuf,
+    dir: &Path,
     task_id: &str,
-    protocol: Protocol,
+    producer: &ImageProducer,
     ctx: &GenCtx,
     index: u32,
     prompt: &str,
@@ -278,7 +243,7 @@ pub(crate) async fn run_one_core(
             None => None,
         };
 
-        let work = dispatch_adapter(ctx, protocol);
+        let work = dispatch_producer(ctx, producer);
         tokio::pin!(work);
         let result = tokio::select! {
             r = &mut work => r,
@@ -335,7 +300,7 @@ pub(crate) async fn run_one_core(
                 // 重试一律无意义：只会拖延时间、重复扣费，并让上游同时压着多个请求。
                 // MJ 是异步协议（提交 + 轮询），重试整个 adapter 等于重新提交一个
                 // 付费任务，因此对它一律不重试。
-                let retryable = !matches!(protocol, Protocol::MidjourneyProxy) && e.is_retryable();
+                let retryable = producer.is_retryable() && e.is_retryable();
                 if !retryable {
                     break;
                 }
@@ -354,6 +319,7 @@ pub(crate) async fn run_one_core(
 /// 建一条任务记录（UI 与无头 MCP 共用，保证两边的任务卡片长得一样）。
 pub fn create_task(
     conn: &rusqlite::Connection,
+    session_id: Option<&str>,
     provider_id: &str,
     protocol: &str,
     request_json: &str,
@@ -362,9 +328,10 @@ pub fn create_task(
     let task_id = uuid::Uuid::new_v4().to_string();
     conn.execute(
         "INSERT INTO tasks (id, session_id, provider_id, protocol, request_json, status, concurrency, total, created_at)
-         VALUES (?1, NULL, ?2, ?3, ?4, 'running', ?5, ?5, ?6)",
+         VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?6, ?7)",
         params![
             task_id,
+            session_id,
             provider_id,
             protocol,
             request_json,
@@ -409,73 +376,11 @@ pub fn finish_task_row(
     .map_err(|e| AppError::Db(format!("tasks 收尾写入失败：{e}")))
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn spawn_task(
-    app: AppHandle,
-    task_id: String,
-    protocol: Protocol,
-    ctx: GenCtx,
-    n: u32,
-    prompt: String,
-    model: String,
-) {
-    let queue = app.state::<QueueState>();
-    let cancel = Arc::new(AtomicBool::new(false));
-    queue.cancels().insert(task_id.clone(), cancel.clone());
-    drop(queue);
-
-    tauri::async_runtime::spawn(async move {
-        let total = n;
-        let results: Vec<Result<(), AppError>> = stream::iter(0..n)
-            .map(|i| {
-                let app = app.clone();
-                let task_id = task_id.clone();
-                let cancel = cancel.clone();
-                let ctx = GenCtx {
-                    base_url: ctx.base_url.clone(),
-                    key: ctx.key.clone(),
-                    model: ctx.model.clone(),
-                    custom_headers: ctx.custom_headers.clone(),
-                    prompt: ctx.prompt.clone(),
-                    size: ctx.size.clone(),
-                    quality: ctx.quality.clone(),
-                    seed: ctx.seed,
-                    refs: ctx.refs.clone(),
-                    mask: ctx.mask.clone(),
-                    cancel: Some(cancel.clone()),
-                };
-                let prompt = prompt.clone();
-                let model = model.clone();
-                async move { run_one(app, task_id, i, total, protocol, ctx, prompt, model, cancel).await }
-            })
-            .buffer_unordered(n.clamp(1, 4) as usize)
-            .collect()
-            .await;
-
-        let failed = results.iter().filter(|r| r.is_err()).count();
-        let status = if cancel.load(Ordering::Relaxed) {
-            "canceled"
-        } else if failed == total as usize {
-            "failed"
-        } else if failed > 0 {
-            "completed_with_errors"
-        } else {
-            "completed"
-        };
-        let first_err = results.iter().find_map(|r| r.as_ref().err().map(|e| e.to_string()));
-        let db = app.state::<Db>();
-        finish_task(&app, &db, &task_id, status, first_err);
-
-        let queue = app.state::<QueueState>();
-        queue.cancels().remove(&task_id);
-    });
-}
-
-pub fn read_file_b64(images_root: &PathBuf, rel_or_abs: &str) -> AppResult<String> {
+pub fn read_file_b64(images_root: &Path, rel_or_abs: &str) -> AppResult<String> {
     let path = PathBuf::from(rel_or_abs);
     let path = if path.is_absolute() { path } else { images_root.join(rel_or_abs) };
     let canonical = path.canonicalize().map_err(|e| AppError::General(e.to_string()))?;
-    let root_canonical = images_root.canonicalize().unwrap_or(images_root.clone());
+    let root_canonical = images_root.canonicalize().unwrap_or_else(|_| images_root.to_path_buf());
     if !canonical.starts_with(&root_canonical) {
         return Err(AppError::General("路径越界".into()));
     }
@@ -499,7 +404,7 @@ pub fn read_file_b64(images_root: &PathBuf, rel_or_abs: &str) -> AppResult<Strin
 
 #[cfg(test)]
 mod tests {
-    use super::{finish_task_row, insert_image, reclaim_orphan_tasks, NewImage};
+    use super::{create_task, finish_task_row, insert_image, reclaim_orphan_tasks, NewImage};
     use crate::error::AppError;
     use rusqlite::{params, Connection};
 
@@ -572,7 +477,7 @@ mod tests {
     fn finish_task_row_writes_status() {
         let conn = Connection::open_in_memory().unwrap();
         crate::storage::init(&conn).unwrap();
-        let task_id = crate::generate::create_task(&conn, "p-1", "openai_images", "{}", 1).unwrap();
+        let task_id = crate::generate::create_task(&conn, None, "p-1", "openai_images", "{}", 1).unwrap();
         finish_task_row(&conn, &task_id, "failed", Some("上游炸了".into())).unwrap();
         let (status, error): (String, Option<String>) = conn
             .query_row(
@@ -623,5 +528,63 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         let err = reclaim_orphan_tasks(&conn).unwrap_err();
         assert!(err.to_string().contains("no such table"), "实际：{err}");
+    }
+
+    fn session_row(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO sessions (id, name, created_at, updated_at) VALUES ('s1','会话','now','now')",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn create_task_persists_session_id() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::storage::init(&conn).unwrap();
+        session_row(&conn);
+        let id = create_task(&conn, Some("s1"), "p-1", "openai_images", "{}", 1).unwrap();
+        let sid: Option<String> = conn
+            .query_row("SELECT session_id FROM tasks WHERE id=?1", [id.as_str()], |r| r.get(0))
+            .unwrap();
+        assert_eq!(sid.as_deref(), Some("s1"));
+    }
+
+    #[test]
+    fn create_task_with_null_session_id_succeeds() {
+        // MCP 与旧前端没有会话概念，列必须继续可空
+        let conn = Connection::open_in_memory().unwrap();
+        crate::storage::init(&conn).unwrap();
+        let id = create_task(&conn, None, "p-1", "openai_images", "{}", 1).unwrap();
+        let sid: Option<String> = conn
+            .query_row("SELECT session_id FROM tasks WHERE id=?1", [id.as_str()], |r| r.get(0))
+            .unwrap();
+        assert_eq!(sid, None);
+    }
+
+    #[test]
+    fn create_task_with_unknown_session_id_is_rejected_by_fk() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::storage::init(&conn).unwrap();
+        let err = create_task(&conn, Some("gone"), "p-1", "openai_images", "{}", 1).unwrap_err();
+        assert!(
+            err.to_string().contains("FOREIGN KEY"),
+            "外键必须真的拦住陈旧会话 id，实际：{err}"
+        );
+    }
+
+    #[test]
+    fn deleting_session_clears_task_session_id_but_keeps_task() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::storage::init(&conn).unwrap();
+        session_row(&conn);
+        let id = create_task(&conn, Some("s1"), "p-1", "openai_images", "{}", 1).unwrap();
+        conn.execute("DELETE FROM sessions WHERE id='s1'", []).unwrap();
+        let sid: Option<String> = conn
+            .query_row("SELECT session_id FROM tasks WHERE id=?1", [id.as_str()], |r| r.get(0))
+            .unwrap();
+        assert_eq!(sid, None, "删会话只清归属，任务与图片都要留下");
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 1);
     }
 }

@@ -13,9 +13,8 @@
 //! 同一张 tasks/images 表、同一个 images 目录，工作台打开就看得见。
 
 use std::io::{self, BufReader};
-use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::Connection;
@@ -23,8 +22,11 @@ use serde_json::{Value, json};
 use tokio::runtime::Runtime;
 
 use crate::error::{AppError, AppResult};
-use crate::generate::types::GenCtx;
-use crate::generate::{self, finish_task_row, read_file_b64, run_one_core};
+use crate::generate::pipeline;
+use crate::generate::types::{
+    GenerateRequest, ImageProducer, MCP_MAX_N, build_request_json, clamp_n,
+};
+use crate::generate::read_file_b64;
 use crate::mcp_protocol::{MessageFraming, read_message, write_message};
 use crate::provider::db as provider_db;
 use crate::storage::{self, Db};
@@ -73,7 +75,7 @@ pub fn run_stdio() -> Result<()> {
     Ok(())
 }
 
-fn handle(db: &Db, images_dir: &PathBuf, runtime: &Runtime, message: Value) -> Option<Value> {
+fn handle(db: &Db, images_dir: &Path, runtime: &Runtime, message: Value) -> Option<Value> {
     let method = message.get("method").and_then(|m| m.as_str())?;
     let id = message.get("id").cloned();
     let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
@@ -117,7 +119,7 @@ fn tools_list() -> Value {
                             "type": "string",
                             "description": "可选：provider 名称或 id；不填用默认（第一个已配好 API Key 的）。用 list_providers 查看。"
                         },
-                        "n": { "type": "integer", "minimum": 1, "maximum": 4, "description": "生成张数（默认 1，最多 4）。" },
+                        "n": { "type": "integer", "minimum": 1, "maximum": MCP_MAX_N, "description": "生成张数（默认 1，最多 4）。" },
                         "size": { "type": "string", "description": "可选分辨率，如 1024x1024。" },
                         "quality": { "type": "string", "description": "可选质量，如 low/medium/high 或 standard/hd。" },
                         "seed": { "type": "integer", "description": "可选随机种子。" }
@@ -137,7 +139,7 @@ fn tools_list() -> Value {
 
 fn call_tool(
     db: &Db,
-    images_dir: &PathBuf,
+    images_dir: &Path,
     runtime: &Runtime,
     params: Value,
     id: Value,
@@ -188,10 +190,10 @@ fn call_tool(
     }
 }
 
-/// 生成：建任务 → 跑适配器 → 落库 → 收尾，全用 app 自己的链路。
+/// 生成：与 GUI 共用 prepare_task + run_task_headless，落库、落盘、收尾全在编排层。
 fn generate(
     db: &Db,
-    images_dir: &PathBuf,
+    images_dir: &Path,
     runtime: &Runtime,
     arguments: Value,
 ) -> Result<Value> {
@@ -204,12 +206,10 @@ fn generate(
     if prompt.is_empty() {
         bail!("prompt 不能为空");
     }
-    let n = arguments
-        .get("n")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(1)
-        .clamp(1, 4) as u32;
-
+    let n = clamp_n(
+        arguments.get("n").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
+        MCP_MAX_N,
+    );
     let provider_hint = arguments.get("provider").and_then(|v| v.as_str());
 
     // 选 provider：名称或 id 都接受，不给就用第一个配好 key 的
@@ -226,11 +226,7 @@ fn generate(
                 .ok_or_else(|| {
                     anyhow!(
                         "找不到 provider '{hint}'（可用：{}）",
-                        items
-                            .iter()
-                            .map(|p| p.name.as_str())
-                            .collect::<Vec<_>>()
-                            .join("、")
+                        items.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join("、")
                     )
                 })?,
             None => items.iter().find(|p| p.has_key).ok_or_else(|| {
@@ -245,136 +241,80 @@ fn generate(
         (provider, key)
     };
 
-    // 按能力表裁剪：MCP 是独立入口，不经过 submit_task
+    // 与 GUI 同一个裁剪入口：MCP 的 refs/mask 恒空，行为等价。
     let caps = crate::capabilities::for_model(provider.protocol, &provider.model);
-    let mut size = arguments
-        .get("size")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let mut quality = arguments
-        .get("quality")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let mut seed = arguments.get("seed").and_then(|v| v.as_u64());
-    if !caps.sizes.contains(&size.as_deref().unwrap_or("")) {
-        size = None;
-    }
-    if !caps.quality.contains(&quality.as_deref().unwrap_or("")) {
-        quality = None;
-    }
-    if !caps.seed {
-        seed = None;
-    }
-
-    let request_json = json!({
-        "prompt": prompt,
-        "n": n,
-        "size": size,
-        "quality": quality,
-        "seed": seed,
-        "ref_count": 0,
-        "source": "mcp",
-    })
-    .to_string();
-
-    let task_id = {
-        let conn = db.conn();
-        generate::create_task(&conn, &provider.id, provider.protocol.as_str(), &request_json, n)?
-    };
-
-    let ctx = GenCtx {
-        base_url: provider.base_url.clone(),
-        key,
-        model: provider.model.clone(),
-        custom_headers: provider.custom_headers.clone(),
+    let mut req = GenerateRequest {
+        provider_id: provider.id.clone(),
         prompt: prompt.clone(),
-        size: size.clone(),
-        quality: quality.clone(),
-        seed,
+        n,
+        size: arguments.get("size").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        quality: arguments.get("quality").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        seed: arguments.get("seed").and_then(|v| v.as_u64()),
         refs: Vec::new(),
         mask: None,
-        cancel: None,
+        session_id: None,
     };
+    crate::capabilities::sanitize(&caps, &mut req);
 
-    let mut images: Vec<Value> = Vec::new();
-    let mut errors: Vec<String> = Vec::new();
-
-    for index in 0..n {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let ctx = GenCtx {
-            base_url: ctx.base_url.clone(),
-            key: ctx.key.clone(),
-            model: ctx.model.clone(),
-            custom_headers: ctx.custom_headers.clone(),
-            prompt: ctx.prompt.clone(),
-            size: ctx.size.clone(),
-            quality: ctx.quality.clone(),
-            seed: ctx.seed,
-            refs: Vec::new(),
-            mask: None,
-            cancel: Some(cancel.clone()),
-        };
-
-        match runtime.block_on(run_one_core(
-            db,
-            images_dir,
-            &task_id,
-            provider.protocol,
-            &ctx,
-            index,
-            &prompt,
-            &provider.model,
-            cancel,
-            // 无头模式不参与 GUI 的全局并发闸门（那道闸门是给 UI 批量提交兜底的）
+    let ctx = pipeline::build_ctx(&provider, key, &req, &prompt);
+    let request_json = build_request_json(&req, n);
+    let task = {
+        let conn = db.conn();
+        pipeline::prepare_task(
+            &conn,
             None,
-        )) {
-            Ok(Some(meta)) => {
-                let data_url = read_file_b64(images_dir, &meta.path).unwrap_or_default();
-                images.push(json!({
-                    "id": meta.id,
-                    "path": meta.path,
-                    "thumb_path": meta.thumb_path,
-                    "data_url": data_url,
-                }));
+            &provider,
+            n,
+            &request_json,
+            ImageProducer::Protocol(provider.protocol),
+            ctx,
+            prompt,
+            provider.model.clone(),
+        )?
+    };
+    let outcome = pipeline::run_task_headless(db, images_dir, runtime, &task);
+
+    let mut images = Vec::new();
+    let mut read_warnings = Vec::new();
+    for meta in &outcome.images {
+        let data_url = match read_file_b64(images_dir, &meta.path) {
+            Ok(v) => v,
+            Err(e) => {
+                read_warnings.push(format!("图片 {} 读取失败：{e}", meta.id));
+                String::new()
             }
-            Ok(None) => {}
-            Err(err) => errors.push(err.to_string()),
-        }
+        };
+        images.push(json!({
+            "id": meta.id,
+            "path": meta.path,
+            "thumb_path": meta.thumb_path,
+            "data_url": data_url,
+        }));
     }
 
-    let status = if images.is_empty() {
-        "failed"
-    } else if errors.is_empty() {
-        "completed"
-    } else {
-        "completed_with_errors"
-    };
-    // 写库失败不再静默：一张图都没有时直接报错；图已经到手却只是 tasks 行没更新，
-    // 那就把原因放进 warning——不能因为记账失败把已生成（已扣费）的图丢回给用户。
-    let db_error = {
-        let conn = db.conn();
-        finish_task_row(&conn, &task_id, status, errors.first().cloned()).err()
-    };
-
     if images.is_empty() {
-        let reason = db_error
-            .map(|e| e.to_string())
-            .or_else(|| errors.first().cloned())
+        let reason = outcome
+            .db_error
+            .clone()
+            .or_else(|| outcome.errors.first().cloned())
             .unwrap_or_else(|| "生成失败".into());
         bail!("{reason}");
     }
 
     let mut result = json!({
-        "task_id": task_id,
-        "status": status,
+        "task_id": outcome.task_id,
+        "status": outcome.status,
         "count": images.len(),
         "images": images,
     });
-    if let Some(err) = errors.first() {
+    if let Some(err) = outcome.errors.first() {
         result["error"] = json!(err);
     }
-    if let Some(e) = db_error {
+    if let Some(e) = &outcome.db_error {
         result["warning"] = json!(format!("图片已入库，但任务状态写入失败：{e}"));
+    }
+    if !read_warnings.is_empty() {
+        result["readWarnings"] = json!(read_warnings);
     }
     Ok(result)
 }

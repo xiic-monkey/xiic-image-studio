@@ -148,6 +148,7 @@ mod tests {
                 mime: "image/png".into(),
                 data: "aGk=".into(),
             }),
+            session_id: None,
         }
     }
 

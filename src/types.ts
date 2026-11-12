@@ -97,6 +97,8 @@ export interface GenerateRequest {
   seed?: number;
   refs: RefImage[];
   mask?: RefImage;
+  /** 当前会话归属；MCP / 旧前端不传，后端按可空处理 */
+  session_id?: string;
 }
 
 export interface ImageMeta {
@@ -128,11 +130,39 @@ export interface TaskItem {
   size?: string | null;
   quality?: string | null;
   n?: number;
+  /** 随机种子，重试时一并带回 */
+  seed?: number | null;
   /** 参考图数量：>0 表示图生图，重试会缺参考图（前端据此隐藏重试入口） */
   ref_count?: number;
+  /** 会话归属；MCP 任务与旧数据为 null */
+  session_id?: string | null;
   /** 该任务已生成的图片（刷新后靠它回填缩略图） */
   images?: ImageMeta[];
 }
+
+/** 任务卡视图模型：轮询结果与实时进度事件合并后的形状。 */
+export interface TaskView {
+  id: string;
+  status: string;
+  done: number;
+  total: number;
+  errors: string[];
+  images: ImageMeta[];
+  createdAt: string;
+  prompt: string;
+  /** 原始参数，重试时复用（重试不带参考图，refCount > 0 的任务不提供重试） */
+  providerId: string;
+  size: string | null;
+  quality: string | null;
+  n: number;
+  refCount: number;
+  /** 随机种子；旧数据为 null */
+  seed: number | null;
+  /** 会话归属；MCP 任务与旧数据为 null，重试时回落到当前会话 */
+  sessionId: string | null;
+}
+
+export type TaskUpsert = Partial<TaskView> & { id: string; error?: string };
 
 // ---------- M3 ----------
 

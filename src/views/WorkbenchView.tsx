@@ -1,457 +1,139 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
-import MaskEditor from "../components/MaskEditor";
+import { useCallback, useEffect, useState } from "react";
 import Select from "../components/Select";
-import TaskPanel, { useTaskFeed, type TaskView } from "../components/TaskPanel";
-import { api } from "../ipc";
-import { isSeedEnabled, normalizeQuality, normalizeSize } from "../lib/capabilities";
-import { parseBatch } from "../lib/batch-parse";
-import { buildSubmissions, pickPrefillPrompt, remainingText } from "../lib/submission";
+import TaskPanel from "../components/TaskPanel";
+import { useDraft } from "../hooks/useDraft";
+import { useSessions } from "../hooks/useSessions";
+import { useSubmissions } from "../hooks/useSubmissions";
+import { useTaskFeed } from "../hooks/useTaskFeed";
+import { normalizeQuality, normalizeSize } from "../lib/capabilities";
+import { filesToRefs, MAX_REFS } from "../lib/ref-image";
+import { pickPrefillPrompt } from "../lib/submission";
 import { usePrefill } from "../stores/prefill";
 import { useProviders } from "../stores/providers";
-import { TEMPLATES } from "../templates";
-import { PROTOCOL_LABELS, type RefImage, type SessionItem } from "../types";
+import type { TemplateItem } from "../templates";
+import { PROTOCOL_LABELS, type RefImage } from "../types";
+import MaskEditorLayer from "./workbench/MaskEditorLayer";
+import ParamRow from "./workbench/ParamRow";
+import RefImages from "./workbench/RefImages";
+import SessionTabs from "./workbench/SessionTabs";
+import { inputCls, labelCls, selCls } from "./workbench/styles";
+import SubmitBar from "./workbench/SubmitBar";
+import TemplatePanel from "./workbench/TemplatePanel";
 
-function fileToRef(file: File): Promise<RefImage> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = String(reader.result);
-      const [head, data] = dataUrl.split(",");
-      const mime = head.slice(5).split(";")[0] || "image/png";
-      resolve({ name: file.name, mime, data });
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
-
-// 批量文件解析抽在 src/lib/batch-parse.ts（纯函数 + 单测）：CSV 里的逗号、
-// 引号转义、纯文本提示词里的逗号，三种情况的切法完全不同，藏在组件里没法测。
-
+/** 组合层：状态与副作用在 hooks，展示在各 workbench 子组件，这里只负责接线。 */
 export default function WorkbenchView() {
+  const [notice, setNotice] = useState<string | null>(null);
   const { providers, load } = useProviders();
   const { tasks, imgUrls, upsert, cancel, remove } = useTaskFeed();
+  const { sessions, sessionId, selectSession, newSession, deleteSession, renameSession } = useSessions(setNotice);
+  const { form, setForm, patch } = useDraft(sessionId, sessions);
 
-  const [providerId, setProviderId] = useState("");
-  const [prompt, setPrompt] = useState("");
-  const [batchMode, setBatchMode] = useState(false);
-  const [size, setSize] = useState("1024x1024");
-  const [quality, setQuality] = useState("auto");
-  const [count, setCount] = useState(1);
-  const [seed, setSeed] = useState("");
-  const [tplOpen, setTplOpen] = useState(false);
   const [refs, setRefs] = useState<RefImage[]>([]);
   const [mask, setMask] = useState<RefImage | null>(null);
   const [maskEditing, setMaskEditing] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [tplOpen, setTplOpen] = useState(false);
   const [dragOver, setDragOver] = useState(false);
-  const [menu, setMenu] = useState<{ x: number; y: number; id: string } | null>(null);
-  const [renamingId, setRenamingId] = useState<string | null>(null);
-  const [renameVal, setRenameVal] = useState("");
-  const areaRef = useRef<HTMLDivElement>(null);
-  const tabsRef = useRef<HTMLDivElement>(null);
 
-  // ---- 多会话 ----
-  const [sessions, setSessions] = useState<SessionItem[]>([]);
-  const [sessionId, setSessionId] = useState("");
-  const skipSave = useRef(true);
+  const { submit, importBatch, retry, submitting } = useSubmissions({
+    providers,
+    providerId: form.providerId,
+    form,
+    refs,
+    mask,
+    sessionId,
+    upsert,
+    patch,
+    clearRefs: () => { setRefs([]); setMask(null); },
+    setNotice,
+  });
 
-  const refreshSessions = useCallback(async (preferId?: string) => {
-    const list = await api.sessionList();
-    setSessions(list);
-    // preferId 缺省时选第一个（挂载 / 删除当前会话后的场景，不依赖闭包里的旧 sessionId）
-    const target = preferId ?? list[0]?.id;
-    if (target && list.some((s) => s.id === target)) {
-      setSessionId(target);
-      const s = list.find((x) => x.id === target)!;
-      skipSave.current = true;
-      setProviderId((prev) => s.draft.providerId ?? prev);
-      setPrompt(s.draft.prompt ?? "");
-      setSize(s.draft.size ?? "1024x1024");
-      setQuality(s.draft.quality ?? "auto");
-      setCount(s.draft.count ?? 1);
-      setSeed(s.draft.seed ?? "");
-      setBatchMode(s.draft.batchMode ?? false);
-    } else if (list.length === 0) {
-      const id = await api.sessionSave({ name: "默认会话" });
-      setSessions(await api.sessionList());
-      setSessionId(id);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    refreshSessions();
-  }, [refreshSessions]);
-
-  // 草稿自动保存（debounce 800ms；refs 不入草稿）
-  useEffect(() => {
-    if (!sessionId) return;
-    if (skipSave.current) {
-      skipSave.current = false;
-      return;
-    }
-    const t = setTimeout(() => {
-      api.sessionSave({
-        id: sessionId,
-        draft: { providerId, prompt, size, quality, count, seed, batchMode },
-      });
-    }, 800);
-    return () => clearTimeout(t);
-  }, [sessionId, providerId, prompt, size, quality, count, seed, batchMode]);
-
-  // ---- 画廊/提示词回填 ----
+  const provider = providers.find((p) => p.id === form.providerId);
+  const caps = provider?.capabilities;
   const prefill = usePrefill((s) => s.prefill);
-  useEffect(() => {
-    if (!prefill) return;
-    setPrompt((prev) => pickPrefillPrompt(prev, prefill.prompt));
-    if (prefill.size) setSize(prefill.size);
-    if (prefill.quality) setQuality(prefill.quality);
-    if (prefill.count) setCount(prefill.count);
-    if (prefill.seed) setSeed(prefill.seed);
-    if (prefill.refs?.length) setRefs((prev) => [...prefill.refs!, ...prev].slice(0, 4));
-  }, [prefill]);
 
   useEffect(() => {
-    load();
+    void load();
   }, [load]);
 
+  // 用函数式更新读 prev：会话切换那一轮的 form 还是上个会话的，
+  // 拿闭包里的旧值覆盖会把新会话草稿冲掉。
   useEffect(() => {
-    if (!providerId && providers.length > 0) setProviderId(providers[0].id);
-  }, [providers, providerId]);
+    if (providers.length === 0) return;
+    setForm((prev) => (prev.providerId ? prev : { ...prev, providerId: providers[0].id }));
+  }, [providers, form.providerId, setForm]);
 
-  const provider = providers.find((p) => p.id === providerId);
-  const caps = provider?.capabilities;
-  const sizeOptions = caps?.sizes ?? [];
-  const qualityOptions = caps?.quality ?? [];
-  // 列宽要跟实际渲染出来的控件数量对上，否则会多出空列
-  const paramCols =
-    sizeOptions.length > 0 && qualityOptions.length > 0
-      ? "grid-cols-[minmax(0,1fr)_minmax(0,1fr)_3.5rem_3.5rem]"
-      : sizeOptions.length > 0 || qualityOptions.length > 0
-        ? "grid-cols-[minmax(0,1fr)_3.5rem_3.5rem]"
-        : "grid-cols-[3.5rem_3.5rem]";
+  // 切换供应商/模型后旧的尺寸/质量可能不在新能力表内。只在展示层回落，
+  // 不改草稿：写回表单会在切会话那一轮把新会话的草稿当成旧会话的来覆盖；
+  // 提交时 buildGenerateRequest 仍会按能力表归一化，上游拿到的值始终是合法的。
+  const displaySize = caps ? normalizeSize(caps, form.size) ?? form.size : form.size;
+  const displayQuality = caps ? normalizeQuality(caps, form.quality) ?? form.quality : form.quality;
 
-  // 切换供应商/模型后，旧的尺寸/质量可能不在新能力表内 → 拉回合法值
+  // ---- 画廊/提示词回填 ----
   useEffect(() => {
-    if (!caps) return;
-    const nextSize = normalizeSize(caps, size);
-    if (nextSize !== undefined && nextSize !== size) setSize(nextSize);
-    const nextQuality = normalizeQuality(caps, quality);
-    if (nextQuality !== undefined && nextQuality !== quality) setQuality(nextQuality);
-  }, [caps, size, quality]);
+    if (!prefill) return;
+    setForm((prev) => ({ ...prev, prompt: pickPrefillPrompt(prev.prompt, prefill.prompt) }));
+    if (prefill.size) patch({ size: prefill.size });
+    if (prefill.quality) patch({ quality: prefill.quality });
+    if (prefill.count) patch({ count: prefill.count });
+    if (prefill.seed) patch({ seed: prefill.seed });
+    if (prefill.refs?.length) {
+      setRefs((prev) => [...prefill.refs!, ...prev].slice(0, MAX_REFS));
+    }
+  }, [prefill, setForm, patch]);
 
   const addFiles = useCallback(async (files: FileList | File[]) => {
-    const imgs = Array.from(files).filter((f) => f.type.startsWith("image/"));
-    const newRefs = await Promise.all(imgs.slice(0, 4).map(fileToRef));
-    setRefs((prev) => [...prev, ...newRefs].slice(0, 4));
+    const newRefs = await filesToRefs(files);
+    setRefs((prev) => [...prev, ...newRefs].slice(0, MAX_REFS));
   }, []);
 
   // 粘贴图片
   useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
       const files = Array.from(e.clipboardData?.files ?? []);
-      if (files.length > 0) addFiles(files);
+      if (files.length > 0) void addFiles(files);
     };
     window.addEventListener("paste", onPaste);
     return () => window.removeEventListener("paste", onPaste);
   }, [addFiles]);
 
-  const submit = async () => {
-    if (!provider) {
-      setNotice("请先在「供应商」页添加并保存供应商");
-      return;
-    }
-    const submissions = buildSubmissions(prompt, batchMode, count);
-    if (submissions.length === 0) {
-      setNotice("请输入提示词");
-      return;
-    }
-    setSubmitting(true);
-    setNotice(null);
-    try {
-      let submitted = 0;
-      let failMsg: string | null = null;
-
-      for (const s of submissions) {
-        try {
-          const taskId = await api.generateSubmit({
-            provider_id: provider.id,
-            prompt: s.prompt,
-            n: s.n,
-            size: caps ? normalizeSize(caps, size) ?? undefined : size || undefined,
-            quality: caps ? normalizeQuality(caps, quality) ?? undefined : undefined,
-            seed: caps && isSeedEnabled(caps) && seed ? Number(seed) : undefined,
-            refs,
-            mask: caps?.mask && mask ? mask : undefined,
-          });
-          upsert({ id: taskId, status: "running", done: 0, total: s.n, errors: [], images: [], createdAt: new Date().toISOString(), prompt: s.prompt });
-          submitted += 1;
-        } catch (e) {
-          failMsg = String(e);
-          break;
-        }
-      }
-
-      // 界面状态必须和"实际提交了什么"严格对齐：
-      // 已提交的行从输入框移除，失败那行连同它后面的原样留着（用户改完可以接着发）；
-      // 参考图只在全部成功时才清——部分失败时，剩下的行还要继续用它。
-      if (failMsg === null) {
-        setPrompt("");
-        setRefs([]);
-        setMask(null);
-        const multiline = prompt.trim().includes("\n");
-        setNotice(
-          submissions.length > 1
-            ? `已提交 ${submitted} 个任务`
-            : multiline
-              ? "已提交 1 个任务（整段文本按一条提示词处理；要每行一个任务请打开「按行批量」）"
-              : null,
-        );
-      } else {
-        setPrompt(remainingText(submissions, submitted));
-        setNotice(`已提交 ${submitted}/${submissions.length} 条，第 ${submitted + 1} 条提交失败：${failMsg}`);
-      }
-    } catch (e) {
-      setNotice(String(e));
-    } finally {
-      setSubmitting(false);
-    }
+  const removeRef = (i: number) => {
+    setRefs((prev) => prev.filter((_, j) => j !== i));
+    if (i === 0) setMask(null);
   };
 
-  // 批量文件导入：读文本文件 → 解析 → 逐行提交（复用 generateSubmit）。
-  const importBatch = async () => {
-    if (!provider) {
-      setNotice("请先在「供应商」页添加并保存供应商");
-      return;
-    }
-    const picked = await open({
-      multiple: false,
-      filters: [{ name: "批量", extensions: ["jsonl", "csv", "txt"] }],
-    });
-    if (!picked || Array.isArray(picked)) return;
-    setSubmitting(true);
-    try {
-      const text = await api.readTextFile(picked);
-      const items = parseBatch(text, picked);
-      if (items.length === 0) {
-        setNotice("文件为空或无有效行");
-        return;
-      }
-      let ok = 0;
-      for (const it of items) {
-        const n = it.n ? Number(it.n) : 1;
-        try {
-          const taskId = await api.generateSubmit({
-            provider_id: provider.id,
-            prompt: it.prompt,
-            n,
-            size: it.size || size || undefined,
-            quality: qualityOptions.length > 0 ? (it.quality ?? (quality === "auto" ? undefined : quality)) : undefined,
-            seed: it.seed ? Number(it.seed) : undefined,
-            refs: [],
-          });
-          upsert({
-            id: taskId,
-            status: "running",
-            done: 0,
-            total: n,
-            errors: [],
-            images: [],
-            createdAt: new Date().toISOString(),
-            prompt: it.prompt,
-          });
-          ok += 1;
-        } catch (e) {
-          setNotice(`批量提交在第 ${ok + 1} 行失败：${String(e)}（已提交 ${ok} 条）`);
-          break;
-        }
-      }
-      if (ok === items.length) setNotice(`已提交 ${ok} 个批量任务`);
-    } catch (e) {
-      setNotice(`读取/解析失败：${String(e)}`);
-    } finally {
-      setSubmitting(false);
-    }
+  const pickTemplate = (t: TemplateItem) => {
+    setForm((prev) => ({ ...prev, prompt: prev.prompt ? `${prev.prompt}\n${t.prompt}` : t.prompt }));
+    if (t.size) patch({ size: t.size });
+    if (t.quality) patch({ quality: t.quality });
+    setTplOpen(false);
   };
-
-  // 一键重试：复用原任务的 prompt / 供应商 / 尺寸 / 质量 / 数量。
-  // 参考图本体没入库，所以只有 refCount === 0 的任务才会走到这里（卡片上才有重试按钮）。
-  const retry = useCallback(
-    async (t: TaskView) => {
-      if (!t.providerId || !t.prompt) {
-        setNotice("该任务缺少可重试的参数（供应商或提示词为空）");
-        return;
-      }
-      try {
-        const taskId = await api.generateSubmit({
-          provider_id: t.providerId,
-          prompt: t.prompt,
-          n: t.n || 1,
-          size: t.size ?? undefined,
-          quality: t.quality ?? undefined,
-          refs: [],
-        });
-        upsert({
-          id: taskId,
-          status: "running",
-          done: 0,
-          total: t.n || 1,
-          errors: [],
-          images: [],
-          createdAt: new Date().toISOString(),
-          prompt: t.prompt,
-        });
-        setNotice("已按原参数重新提交");
-      } catch (e) {
-        setNotice(`重试失败：${String(e)}`);
-      }
-    },
-    [upsert],
-  );
-
-  const delSession = async (id: string) => {
-    if (sessions.length <= 1) return setNotice("至少保留一个会话");
-    if (!confirm("删除该会话？（不影响已生成图片）")) return;
-    await api.sessionDelete(id);
-    // 删的是当前会话 → 选第一个；删的是别的 → 保持在当前
-    refreshSessions(id === sessionId ? undefined : sessionId);
-  };
-
-  // 新会话命名：取最小的未占用编号（存在「会话3」时新建「会话1」，再「会话2」，再「会话4」）
-  const newSession = async () => {
-    const names = new Set(sessions.map((s) => s.name));
-    let i = 1;
-    while (names.has(`会话 ${i}`)) i++;
-    const id = await api.sessionSave({ name: `会话 ${i}` });
-    await refreshSessions(id);
-    // 渲染提交后把 tab 条滚到最右，露出新 tab（列表按创建时间升序，新 tab 在末尾）
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      const el = tabsRef.current;
-      if (el) el.scrollLeft = el.scrollWidth;
-    }));
-  };
-
-  const startRename = (id: string) => {
-    setRenameVal(sessions.find((s) => s.id === id)?.name ?? "");
-    setRenamingId(id);
-  };
-
-  const commitRename = async () => {
-    const id = renamingId;
-    setRenamingId(null);
-    if (!id) return;
-    const name = renameVal.trim();
-    if (!name) return;
-    await api.sessionSave({ id, name });
-    refreshSessions(id);
-  };
-
-  // 右键菜单：点击外部 / Esc / resize 关闭
-  useEffect(() => {
-    if (!menu) return;
-    const close = () => setMenu(null);
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setMenu(null); };
-    window.addEventListener("mousedown", close);
-    window.addEventListener("resize", close);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", close);
-      window.removeEventListener("resize", close);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [menu]);
-
-  const inputCls =
-    "w-full rounded-md border border-neutral-300 bg-white px-3 py-2 text-sm focus:border-orange-500 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100";
-  // 参数下拉紧凑版（对齐市面生图工具的 30px 控件规格）
-  const selCls =
-    "w-full rounded-md border border-neutral-300 bg-white px-2.5 py-1.5 text-xs focus:border-orange-500 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100";
-  const labelCls = "mb-0.5 block text-[11px] font-medium text-neutral-500 dark:text-neutral-400";
 
   return (
     <div className="flex h-full">
       {/* 左：参数区 */}
-      <div ref={areaRef} className="w-[380px] shrink-0 space-y-4 overflow-y-auto border-r border-neutral-200 px-5 pb-5 pt-3.5 dark:border-neutral-800"
+      <div
+        className="w-[380px] shrink-0 space-y-4 overflow-y-auto border-r border-neutral-200 px-5 pb-5 pt-3.5 dark:border-neutral-800"
         onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
         onDragLeave={() => setDragOver(false)}
-        onDrop={(e) => { e.preventDefault(); setDragOver(false); addFiles(e.dataTransfer.files); }}>
+        onDrop={(e) => { e.preventDefault(); setDragOver(false); void addFiles(e.dataTransfer.files); }}
+      >
         <h1 className="text-base font-medium leading-6">工作台</h1>
 
-        {/* 会话 tabs 行：tabs 可横向滚动，+ 固定在行尾；sticky 吸顶，随左栏滚动时保持可见 */}
-        <div className="sticky top-0 z-10 flex items-center gap-1 border-b border-neutral-200 bg-white pb-2 pt-1 dark:border-neutral-800">
-          <div ref={tabsRef} className="no-scrollbar -mx-1 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto px-1 py-0.5">
-            {sessions.map((s) => {
-              const active = s.id === sessionId;
-              const isRenaming = renamingId === s.id;
-              return (
-                <div
-                  key={s.id}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    setMenu({ x: Math.min(e.clientX, window.innerWidth - 140), y: Math.min(e.clientY, window.innerHeight - 90), id: s.id });
-                  }}
-                  onDoubleClick={() => { if (!isRenaming) startRename(s.id); }}
-                  className={`group flex shrink-0 items-center gap-1 rounded-md border px-2.5 py-1 text-xs transition-colors ${
-                    active
-                      ? "border-orange-300 bg-orange-50 font-medium text-orange-700 dark:border-orange-700 dark:bg-orange-950 dark:text-orange-400"
-                      : "border-neutral-200 text-neutral-600 hover:bg-neutral-100 dark:border-neutral-800 dark:text-neutral-400 dark:hover:bg-neutral-800"
-                  }`}
-                >
-                  {isRenaming ? (
-                    <input
-                      autoFocus
-                      value={renameVal}
-                      onChange={(e) => setRenameVal(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") commitRename();
-                        else if (e.key === "Escape") setRenamingId(null);
-                      }}
-                      onBlur={commitRename}
-                      className="w-[100px] rounded border border-orange-400 bg-white px-1 py-0.5 text-xs outline-none dark:bg-neutral-900"
-                    />
-                  ) : (
-                    <>
-                      <button
-                        className="max-w-[110px] truncate"
-                        title={s.name}
-                        onClick={() => {
-                          if (active) return;
-                          skipSave.current = true;
-                          refreshSessions(s.id);
-                        }}
-                      >{s.name}</button>
-                      {sessions.length > 1 && (
-                        <button
-                          title="删除该会话"
-                          aria-label={`删除会话 ${s.name}`}
-                          className={`-mr-0.5 rounded text-[13px] leading-none hover:text-red-500 ${
-                            active ? "opacity-60 hover:opacity-100" : "opacity-0 group-hover:opacity-60"
-                          }`}
-                          onClick={(e) => { e.stopPropagation(); delSession(s.id); }}
-                        >×</button>
-                      )}
-                    </>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-          <button
-            title="新建会话"
-            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-neutral-200 text-sm leading-none text-neutral-500 hover:border-orange-300 hover:bg-orange-50 hover:text-orange-600 dark:border-neutral-800 dark:hover:border-orange-700 dark:hover:bg-orange-950"
-            onClick={newSession}
-          >+</button>
-        </div>
+        <SessionTabs
+          sessions={sessions}
+          sessionId={sessionId}
+          onSelect={selectSession}
+          onNew={newSession}
+          onDelete={deleteSession}
+          onRename={renameSession}
+        />
 
         <div>
           <label className={labelCls}>供应商 / 模型</label>
           <Select
             className={selCls}
-            value={providerId}
-            onChange={setProviderId}
+            value={form.providerId}
+            onChange={(v) => patch({ providerId: v })}
             options={
               providers.length === 0
                 ? [{ value: "", label: "（先去供应商页添加）" }]
@@ -469,159 +151,64 @@ export default function WorkbenchView() {
             <button
               type="button"
               role="switch"
-              aria-checked={batchMode}
-              onClick={() => setBatchMode((b) => !b)}
+              aria-checked={form.batchMode}
+              onClick={() => setForm((prev) => ({ ...prev, batchMode: !prev.batchMode }))}
               className={`rounded-md px-2 py-0.5 text-[11px] transition-colors ${
-                batchMode
+                form.batchMode
                   ? "bg-orange-100 font-medium text-orange-700 dark:bg-orange-950 dark:text-orange-400"
                   : "text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800"
               }`}
-            >{`按行批量 ${batchMode ? "开" : "关"}`}</button>
+            >{`按行批量 ${form.batchMode ? "开" : "关"}`}</button>
           </div>
-          <textarea className={`${inputCls} min-h-[120px] resize-y`} value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            placeholder={batchMode ? "一行一个提示词，每行提交一个任务" : "描述你想要的画面…（换行不会拆成多个任务）"} />
-          {batchMode && <p className="mt-1 text-[11px] text-neutral-500">批量模式：每行一个任务、每行 1 张，「数量」不生效。</p>}
-        </div>
-
-        <div>
-          <div className="flex items-center justify-between">
-            <label className={labelCls}>参考图（最多 4 张，拖拽 / 粘贴 / 点击添加）</label>
-            {refs.length > 0 && caps?.mask && (
-              <button className="text-xs text-orange-600 hover:underline" onClick={() => setMaskEditing(true)}>
-                {mask ? "重新涂抹" : "涂抹重绘"}
-              </button>
-            )}
-          </div>
-          <button
-            className={`flex h-20 w-full items-center justify-center rounded-md border border-dashed text-xs transition-colors ${
-              dragOver ? "border-orange-500 bg-orange-50 text-orange-600" : "border-neutral-300 text-neutral-400 hover:border-neutral-400 dark:border-neutral-700"
-            }`}
-            onClick={() => {
-              const input = document.createElement("input");
-              input.type = "file";
-              input.accept = "image/*";
-              input.multiple = true;
-              input.onchange = () => input.files && addFiles(input.files);
-              input.click();
-            }}
-          >
-            + 添加参考图（图生图 / 局部编辑）
-          </button>
-          {refs.length > 0 && (
-            <div className="mt-2 flex gap-2">
-              {refs.map((r, i) => (
-                <div key={i} className="relative">
-                  <img src={`data:${r.mime};base64,${r.data}`} className={`h-14 w-14 rounded object-cover ${i === 0 && mask ? "outline outline-2 outline-orange-500" : ""}`} alt="" />
-                  <button className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-neutral-800 text-xs text-white"
-                    onClick={() => { setRefs(refs.filter((_, j) => j !== i)); if (i === 0) setMask(null); }}>×</button>
-                </div>
-              ))}
-              {mask && (
-                <span className="self-center rounded bg-orange-50 px-2 py-1 text-[11px] text-orange-600 dark:bg-orange-950">
-                  重绘模式 · 首图为底图
-                  <button className="ml-1 text-orange-400 hover:underline" onClick={() => setMask(null)}>清除</button>
-                </span>
-              )}
-            </div>
+          <textarea
+            className={`${inputCls} min-h-[120px] resize-y`}
+            value={form.prompt}
+            onChange={(e) => patch({ prompt: e.target.value })}
+            placeholder={form.batchMode ? "一行一个提示词，每行提交一个任务" : "描述你想要的画面…（换行不会拆成多个任务）"}
+          />
+          {form.batchMode && (
+            <p className="mt-1 text-[11px] text-neutral-500">批量模式：每行一个任务、每行 1 张，「数量」不生效。</p>
           )}
         </div>
 
-        {/* 参数行：按协议/模型能力收敛——不支持的能力置灰或不显示，不再静默忽略 */}
-        <div className={`grid gap-2 ${paramCols}`}>
-          {sizeOptions.length > 0 && (
-            <div>
-              <label className={labelCls}>{caps?.sizeLabel ?? "尺寸"}</label>
-              <Select
-                className={selCls}
-                value={size}
-                onChange={setSize}
-                options={sizeOptions.map((s) => ({ value: s, label: s }))}
-              />
-            </div>
-          )}
-          {qualityOptions.length > 0 && (
-            <div>
-              <label className={labelCls}>质量</label>
-              <Select
-                className={selCls}
-                value={quality}
-                onChange={setQuality}
-                options={qualityOptions.map((q) => ({ value: q, label: q }))}
-              />
-            </div>
-          )}
-          <div>
-            <label className={labelCls} title="仅部分协议/模型支持，以能力表为准">种子</label>
-            <input
-              type="number"
-              className={selCls}
-              value={seed}
-              onChange={(e) => setSeed(e.target.value)}
-              placeholder="随机"
-              disabled={caps ? !isSeedEnabled(caps) : false}
-              title={caps && !isSeedEnabled(caps) ? "当前协议/模型不支持种子" : "仅部分协议/模型支持，以能力表为准"}
-            />
-          </div>
-          <div>
-            <label className={labelCls}>数量</label>
-            <Select
-              className={selCls}
-              value={String(count)}
-              onChange={(v) => setCount(Number(v))}
-              options={[1, 2, 3, 4, 6, 8].map((n) => ({ value: String(n), label: String(n) }))}
-            />
-          </div>
-        </div>
+        <RefImages
+          refs={refs}
+          mask={mask}
+          maskEnabled={!!caps?.mask}
+          dragOver={dragOver}
+          onAddFiles={addFiles}
+          onRemove={removeRef}
+          onClearMask={() => setMask(null)}
+          onEditMask={() => setMaskEditing(true)}
+        />
 
-        {notice && <div className="rounded-md bg-blue-50 px-3 py-2 text-xs text-blue-700 dark:bg-blue-950 dark:text-blue-400">{notice}</div>}
+        <ParamRow
+          caps={caps}
+          size={displaySize}
+          quality={displayQuality}
+          seed={form.seed}
+          count={form.count}
+          onSize={(v) => patch({ size: v })}
+          onQuality={(v) => patch({ quality: v })}
+          onSeed={(v) => patch({ seed: v })}
+          onCount={(v) => patch({ count: v })}
+        />
 
-        <div className="flex gap-2">
-          <button
-            className="rounded-md border border-neutral-300 px-3 py-1.5 text-sm text-neutral-700 hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-800"
-            onClick={() => setTplOpen((o) => !o)} disabled={submitting}>
-            模板
-          </button>
-          <button
-            className="rounded-md border border-neutral-300 px-3 py-1.5 text-sm text-neutral-700 hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-800"
-            onClick={importBatch} disabled={submitting}>
-            导入批量
-          </button>
-          <button className="flex-1 rounded-md bg-orange-600 py-1.5 text-sm font-medium text-white hover:bg-orange-700 disabled:opacity-50"
-            onClick={submit} disabled={submitting}>
-            {submitting ? "提交中…" : "生成"}
-          </button>
-        </div>
-
-        {tplOpen && (
-          <div className="rounded-md border border-neutral-200 p-3 dark:border-neutral-800">
-            <div className="mb-2 flex items-center justify-between">
-              <span className="text-xs font-medium text-neutral-500">插入预设模板（追加到提示词）</span>
-              <button className="text-xs text-neutral-400 hover:underline" onClick={() => setTplOpen(false)}>关闭</button>
-            </div>
-            <div className="space-y-2">
-              {TEMPLATES.map((c) => (
-                <div key={c.cat}>
-                  <div className="text-[11px] font-medium text-neutral-500">{c.cat}</div>
-                  <div className="mt-1 flex flex-wrap gap-1.5">
-                    {c.items.map((t) => (
-                      <button
-                        key={t.title}
-                        className="rounded-md border border-neutral-200 px-2 py-1 text-[11px] hover:border-orange-300 hover:bg-orange-50 dark:border-neutral-800 dark:hover:border-orange-700 dark:hover:bg-orange-950"
-                        onClick={() => {
-                          setPrompt((prev) => (prev ? `${prev}\n${t.prompt}` : t.prompt));
-                          if (t.size) setSize(t.size);
-                          if (t.quality) setQuality(t.quality);
-                          setTplOpen(false);
-                        }}
-                      >{t.title}</button>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
+        {notice && (
+          <div className="rounded-md bg-blue-50 px-3 py-2 text-xs text-blue-700 dark:bg-blue-950 dark:text-blue-400">
+            {notice}
           </div>
         )}
+
+        <SubmitBar
+          submitting={submitting}
+          tplOpen={tplOpen}
+          onToggleTemplates={() => setTplOpen((o) => !o)}
+          onImportBatch={() => void importBatch()}
+          onSubmit={() => void submit()}
+        />
+
+        {tplOpen && <TemplatePanel onPick={pickTemplate} onClose={() => setTplOpen(false)} />}
       </div>
 
       {/* 右：任务面板 */}
@@ -632,26 +219,8 @@ export default function WorkbenchView() {
         <TaskPanel tasks={tasks} imgUrls={imgUrls} onCancel={cancel} onDelete={remove} onRetry={retry} />
       </div>
 
-      {/* 会话 tab 右键菜单 */}
-      {menu && (
-        <div
-          className="fixed z-[100] min-w-[120px] rounded-md border border-neutral-200 bg-white py-1 shadow-lg dark:border-neutral-700 dark:bg-neutral-900"
-          style={{ left: menu.x, top: menu.y }}
-          onMouseDown={(e) => e.stopPropagation()}
-        >
-          <button
-            className="block w-full px-3 py-1.5 text-left text-xs text-neutral-700 hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800"
-            onClick={() => { startRename(menu.id); setMenu(null); }}
-          >重命名</button>
-          <button
-            className="block w-full px-3 py-1.5 text-left text-xs text-red-600 hover:bg-red-50 dark:hover:bg-red-950"
-            onClick={() => { const id = menu.id; setMenu(null); delSession(id); }}
-          >删除</button>
-        </div>
-      )}
-
-      {maskEditing && refs[0] && (
-        <MaskEditor
+      {maskEditing && (
+        <MaskEditorLayer
           image={refs[0]}
           onDone={(m) => { setMask(m); setMaskEditing(false); }}
           onClose={() => setMaskEditing(false)}
