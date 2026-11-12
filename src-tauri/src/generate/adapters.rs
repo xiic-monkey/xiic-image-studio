@@ -61,7 +61,9 @@ async fn image_from_data(v: &Value) -> AppResult<ImageOut> {
     if let Some(url) = v.get("url").and_then(|x| x.as_str()) {
         return download_url(url).await;
     }
-    Err(AppError::Fetch("响应中没有图片数据（b64_json/url 均缺失）".into()))
+    Err(AppError::Fetch(
+        "响应中没有图片数据（b64_json/url 均缺失）".into(),
+    ))
 }
 
 /// 下载生成结果。这里只重试下载本身，绝不重新提交生成请求——
@@ -74,7 +76,11 @@ async fn download_url(url: &str) -> AppResult<ImageOut> {
         let mime = head.split(';').next().unwrap_or("image/png").to_string();
         let bytes =
             b64_decode(data).map_err(|e| AppError::Fetch(format!("data url 解码失败: {e}")))?;
-        return Ok(ImageOut { bytes, mime, meta: None });
+        return Ok(ImageOut {
+            bytes,
+            mime,
+            meta: None,
+        });
     }
 
     let client = image_client();
@@ -152,7 +158,8 @@ fn extract_urls(text: &str) -> Vec<String> {
     if urls.is_empty() {
         for token in text.split_whitespace() {
             let t = token.trim_matches(|c| c == ')' || c == '"' || c == '\'');
-            if t.starts_with("http://") || t.starts_with("https://") || t.starts_with("data:image") {
+            if t.starts_with("http://") || t.starts_with("https://") || t.starts_with("data:image")
+            {
                 urls.push(t.to_string());
             }
         }
@@ -196,7 +203,11 @@ pub async fn openai_images(ctx: &GenCtx) -> AppResult<ImageOut> {
         // seed 不下发：Images API 规范里没有这个字段
         for r in &ctx.refs {
             let file = reqwest::multipart::Part::bytes(b64_decode(&r.data)?)
-                .file_name(if r.name.is_empty() { "ref.png".into() } else { r.name.clone() })
+                .file_name(if r.name.is_empty() {
+                    "ref.png".into()
+                } else {
+                    r.name.clone()
+                })
                 .mime_str(&r.mime)?;
             form = form.part("image[]", file);
         }
@@ -316,7 +327,10 @@ pub async fn gemini_native(ctx: &GenCtx) -> AppResult<ImageOut> {
     }
     let client = image_client();
     let model = ctx.model.trim_start_matches("models/");
-    let url = join_url(&ctx.base_url, &format!("/v1beta/models/{model}:generateContent"));
+    let url = join_url(
+        &ctx.base_url,
+        &format!("/v1beta/models/{model}:generateContent"),
+    );
 
     let mut parts: Vec<Value> = vec![json!({"text": ctx.prompt})];
     for r in &ctx.refs {
@@ -353,9 +367,12 @@ pub async fn gemini_native(ctx: &GenCtx) -> AppResult<ImageOut> {
             err["message"].as_str().unwrap_or(&err.to_string())
         )));
     }
-    let candidates = resp_body["candidates"]
-        .as_array()
-        .ok_or_else(|| AppError::Fetch(format!("无 candidates: {}", resp_body.to_string().chars().take(200).collect::<String>())))?;
+    let candidates = resp_body["candidates"].as_array().ok_or_else(|| {
+        AppError::Fetch(format!(
+            "无 candidates: {}",
+            resp_body.to_string().chars().take(200).collect::<String>()
+        ))
+    })?;
     for cand in candidates {
         if let Some(parts) = cand["content"]["parts"].as_array() {
             for p in parts {
@@ -438,7 +455,10 @@ async fn poll_mj_task(
                 return Err(AppError::General("已取消".into()));
             }
         }
-        let rb = apply_headers(client.get(&fetch_url).bearer_auth(&ctx.key), &ctx.custom_headers);
+        let rb = apply_headers(
+            client.get(&fetch_url).bearer_auth(&ctx.key),
+            &ctx.custom_headers,
+        );
         let status: Value = send_json(rb).await?;
         match status["status"].as_str().unwrap_or("") {
             "SUCCESS" => {
@@ -465,7 +485,11 @@ pub async fn midjourney_proxy(ctx: &GenCtx) -> AppResult<ImageOut> {
     let url = join_url(&ctx.base_url, "/mj/submit/imagine");
     let mut body = json!({"prompt": ctx.prompt});
     if !ctx.refs.is_empty() {
-        body["base64Array"] = json!(ctx.refs.iter().map(|r| data_url(&r.mime, &r.data)).collect::<Vec<_>>());
+        body["base64Array"] = json!(ctx
+            .refs
+            .iter()
+            .map(|r| data_url(&r.mime, &r.data))
+            .collect::<Vec<_>>());
     }
     let rb = apply_headers(client.post(&url).bearer_auth(&ctx.key), &ctx.custom_headers);
     let resp: Value = send_json(rb.json(&body)).await?;
@@ -489,11 +513,16 @@ pub async fn midjourney_proxy(ctx: &GenCtx) -> AppResult<ImageOut> {
 
 /// MJ U/V 放大变换。走与 imagine 相同的提交/轮询/下载链路，
 /// meta 里必须带回新的 mj_task_id，画廊才能对结果图继续做 U/V。
-pub async fn midjourney_action(ctx: &GenCtx, mj_task_id: &str, command: &str) -> AppResult<ImageOut> {
+pub async fn midjourney_action(
+    ctx: &GenCtx,
+    mj_task_id: &str,
+    command: &str,
+) -> AppResult<ImageOut> {
     let client = http_client();
     let url = join_url(&ctx.base_url, "/mj/submit/action");
     let rb = apply_headers(client.post(&url).bearer_auth(&ctx.key), &ctx.custom_headers);
-    let resp: Value = send_json(rb.json(&json!({"taskId": mj_task_id, "command": command}))).await?;
+    let resp: Value =
+        send_json(rb.json(&json!({"taskId": mj_task_id, "command": command}))).await?;
     if resp["code"].as_i64() != Some(1) && resp["code"].as_str() != Some("1") {
         return Err(AppError::General(format!(
             "MJ action 提交失败: {}",
@@ -603,10 +632,11 @@ mod tests {
         (format!("http://{addr}"), sink)
     }
 
+    /// 每次请求的 (头部, 请求体)
+    type CapturedRequests = Arc<Mutex<Vec<(String, String)>>>;
+
     /// 按顺序回 N 条响应，并把每次请求的头部与请求体都记下来。
-    fn capture_server_n(
-        responses: Vec<(u16, &'static str)>,
-    ) -> (String, Arc<Mutex<Vec<(String, String)>>>) {
+    fn capture_server_n(responses: Vec<(u16, &'static str)>) -> (String, CapturedRequests) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let sink = Arc::new(Mutex::new(Vec::new()));
@@ -646,9 +676,10 @@ mod tests {
                     buf.extend_from_slice(&tmp[..n]);
                 }
                 let end = (header_end + content_length).min(buf.len());
-                out.lock()
-                    .unwrap()
-                    .push((head, String::from_utf8_lossy(&buf[header_end..end]).to_string()));
+                out.lock().unwrap().push((
+                    head,
+                    String::from_utf8_lossy(&buf[header_end..end]).to_string(),
+                ));
                 let reason = match status {
                     200 => "OK",
                     500 => "Internal Server Error",
@@ -730,8 +761,14 @@ mod tests {
         });
         let _ = super::openai_images(&c).await;
         let (head, body) = cap.lock().unwrap().clone();
-        assert!(head.starts_with("POST /v1/images/edits"), "实际请求行：{head}");
-        assert!(!body.contains("name=\"seed\""), "multipart 不该带 seed：{body}");
+        assert!(
+            head.starts_with("POST /v1/images/edits"),
+            "实际请求行：{head}"
+        );
+        assert!(
+            !body.contains("name=\"seed\""),
+            "multipart 不该带 seed：{body}"
+        );
         assert!(body.contains("name=\"size\""), "multipart 应带 size");
         assert!(body.contains("name=\"mask\""), "multipart 应带 mask");
     }
@@ -819,7 +856,9 @@ mod tests {
     #[tokio::test]
     async fn download_retries_5xx_without_resubmitting_generation() {
         let url = serve_images(vec![(500, "temporary"), (200, "image-bytes")]);
-        let out = download_url(&url).await.expect("download should retry the 500");
+        let out = download_url(&url)
+            .await
+            .expect("download should retry the 500");
         assert_eq!(out.bytes, b"image-bytes");
     }
 
@@ -827,19 +866,40 @@ mod tests {
     async fn mj_action_posts_and_polls_with_meta() {
         let (base, cap) = capture_server_n(vec![
             (200, r#"{"code":1,"result":"new-mj"}"#),
-            (200, r#"{"status":"SUCCESS","imageUrl":"data:image/png;base64,aGk="}"#),
+            (
+                200,
+                r#"{"status":"SUCCESS","imageUrl":"data:image/png;base64,aGk="}"#,
+            ),
         ]);
         let out = super::midjourney_action(&ctx(base, "midjourney"), "old-mj", "U1")
             .await
             .unwrap();
         let reqs = cap.lock().unwrap().clone();
         assert_eq!(reqs.len(), 2, "提交 + 轮询各一次");
-        assert!(reqs[0].0.starts_with("POST /mj/submit/action"), "实际：{}", reqs[0].0);
-        assert!(reqs[0].1.contains(r#""taskId":"old-mj""#), "实际：{}", reqs[0].1);
-        assert!(reqs[0].1.contains(r#""command":"U1""#), "实际：{}", reqs[0].1);
-        assert!(reqs[1].0.starts_with("GET /mj/task/new-mj/fetch"), "实际：{}", reqs[1].0);
+        assert!(
+            reqs[0].0.starts_with("POST /mj/submit/action"),
+            "实际：{}",
+            reqs[0].0
+        );
+        assert!(
+            reqs[0].1.contains(r#""taskId":"old-mj""#),
+            "实际：{}",
+            reqs[0].1
+        );
+        assert!(
+            reqs[0].1.contains(r#""command":"U1""#),
+            "实际：{}",
+            reqs[0].1
+        );
+        assert!(
+            reqs[1].0.starts_with("GET /mj/task/new-mj/fetch"),
+            "实际：{}",
+            reqs[1].0
+        );
         assert_eq!(out.bytes, b"hi");
-        let meta = out.meta.expect("放大图必须带上新的 mj_task_id 才能继续 U/V");
+        let meta = out
+            .meta
+            .expect("放大图必须带上新的 mj_task_id 才能继续 U/V");
         assert_eq!(meta["mj_task_id"], "new-mj");
         assert_eq!(meta["action"], "U1");
     }
@@ -850,7 +910,10 @@ mod tests {
         let err = super::midjourney_action(&ctx(base, "midjourney"), "old", "U1")
             .await
             .unwrap_err();
-        assert!(matches!(err, crate::error::AppError::Status(500, _)), "实际：{err}");
+        assert!(
+            matches!(err, crate::error::AppError::Status(500, _)),
+            "实际：{err}"
+        );
     }
 
     #[tokio::test]
@@ -869,12 +932,25 @@ mod tests {
     async fn imagine_still_polls_and_returns_mj_task_id() {
         let (base, cap) = capture_server_n(vec![
             (200, r#"{"code":1,"result":"t1"}"#),
-            (200, r#"{"status":"SUCCESS","imageUrl":"data:image/png;base64,aGk="}"#),
+            (
+                200,
+                r#"{"status":"SUCCESS","imageUrl":"data:image/png;base64,aGk="}"#,
+            ),
         ]);
-        let out = super::midjourney_proxy(&ctx(base, "midjourney")).await.unwrap();
+        let out = super::midjourney_proxy(&ctx(base, "midjourney"))
+            .await
+            .unwrap();
         let reqs = cap.lock().unwrap().clone();
-        assert!(reqs[0].0.starts_with("POST /mj/submit/imagine"), "实际：{}", reqs[0].0);
-        assert!(reqs[1].0.starts_with("GET /mj/task/t1/fetch"), "实际：{}", reqs[1].0);
+        assert!(
+            reqs[0].0.starts_with("POST /mj/submit/imagine"),
+            "实际：{}",
+            reqs[0].0
+        );
+        assert!(
+            reqs[1].0.starts_with("GET /mj/task/t1/fetch"),
+            "实际：{}",
+            reqs[1].0
+        );
         assert_eq!(out.meta.unwrap()["mj_task_id"], "t1");
     }
 }

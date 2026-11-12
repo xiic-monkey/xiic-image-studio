@@ -15,18 +15,25 @@ mod prompts;
 mod sessions;
 pub mod storage;
 
+use crate::error::AppResult;
 use gallery::{image_delete, image_list, image_reveal, image_set_favorite};
-use generate::commands::{generate_cancel, generate_submit, image_read_b64, mj_action, task_delete, task_list};
+use generate::commands::{
+    generate_cancel, generate_submit, image_read_b64, mj_action, task_delete, task_list,
+};
 use generate::QueueState;
-use media::{tools_convert, tools_file_b64, tools_gif, tools_set_ffmpeg_path, tools_status, tools_video_frames};
+use media::{
+    tools_convert, tools_file_b64, tools_gif, tools_set_ffmpeg_path, tools_status,
+    tools_video_frames,
+};
 use prompts::{prompt_delete, prompt_list, prompt_save};
-use provider::commands::{provider_delete, provider_discover_models, provider_list, provider_save, provider_test};
+use provider::commands::{
+    provider_delete, provider_discover_models, provider_list, provider_save, provider_test,
+};
 use provider::db as provider_db;
 use sessions::{session_delete, session_list, session_save};
 use std::path::PathBuf;
 use storage::Db;
 use tauri::Manager;
-use crate::error::AppResult;
 
 /// 读取用户通过文件对话框选中的文本文件（批量导入用）。仅读用户显式选中的路径，
 /// 上限 16MB，避免误读大文件卡住 UI。
@@ -34,13 +41,18 @@ use crate::error::AppResult;
 fn read_text_file(path: String) -> AppResult<String> {
     let p = PathBuf::from(&path);
     if !p.is_file() {
-        return Err(crate::error::AppError::General(format!("文件不存在: {path}")));
+        return Err(crate::error::AppError::General(format!(
+            "文件不存在: {path}"
+        )));
     }
     let meta = std::fs::metadata(&p).map_err(|e| crate::error::AppError::General(e.to_string()))?;
     if meta.len() > 16 * 1024 * 1024 {
-        return Err(crate::error::AppError::General("文件过大（超过 16MB），请拆小后再导入".into()));
+        return Err(crate::error::AppError::General(
+            "文件过大（超过 16MB），请拆小后再导入".into(),
+        ));
     }
-    std::fs::read_to_string(&p).map_err(|e| crate::error::AppError::General(format!("读取失败: {e}")))
+    std::fs::read_to_string(&p)
+        .map_err(|e| crate::error::AppError::General(format!("读取失败: {e}")))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -49,10 +61,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let app_dir: PathBuf = app
-                .path()
-                .app_data_dir()
-                .expect("无法获取应用数据目录");
+            let app_dir: PathBuf = app.path().app_data_dir().expect("无法获取应用数据目录");
             std::fs::create_dir_all(&app_dir)?;
             let conn = rusqlite::Connection::open(storage::db_path(&app_dir))?;
             storage::init(&conn)?;
@@ -96,11 +105,17 @@ pub fn run() {
                     if let Ok(ns_win) = window.ns_window() {
                         #[link(name = "objc", kind = "dylib")]
                         extern "C" {
-                            fn objc_msgSend(receiver: *mut std::ffi::c_void, sel: *const std::ffi::c_void, behavior: usize) -> *mut std::ffi::c_void;
-                            fn sel_registerName(name: *const std::ffi::c_char) -> *const std::ffi::c_void;
+                            fn objc_msgSend(
+                                receiver: *mut std::ffi::c_void,
+                                sel: *const std::ffi::c_void,
+                                behavior: usize,
+                            ) -> *mut std::ffi::c_void;
+                            fn sel_registerName(
+                                name: *const std::ffi::c_char,
+                            ) -> *const std::ffi::c_void;
                         }
                         unsafe {
-                            let sel = sel_registerName(b"setCollectionBehavior:\0".as_ptr() as *const std::ffi::c_char);
+                            let sel = sel_registerName(c"setCollectionBehavior:".as_ptr());
                             // NSWindowCollectionBehaviorMoveToActiveSpace = 1 << 2
                             objc_msgSend(ns_win, sel, 1usize << 2);
                         }

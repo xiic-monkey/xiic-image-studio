@@ -19,7 +19,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let conn = rusqlite::Connection::open(&path)?;
     storage::init(&conn)?;
 
-    let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")?;
+    let mut stmt =
+        conn.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")?;
     let tables: Vec<String> = stmt
         .query_map([], |r| r.get::<_, String>(0))?
         .filter_map(|r| r.ok())

@@ -3,7 +3,8 @@ use crate::provider::types::*;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::BTreeMap;
 
-const COLS: &str = "id, name, base_url, protocol, model, custom_headers, api_key, created_at, updated_at";
+const COLS: &str =
+    "id, name, base_url, protocol, model, custom_headers, api_key, created_at, updated_at";
 
 fn row_to_provider(row: &rusqlite::Row) -> rusqlite::Result<Provider> {
     let protocol_str: String = row.get(3)?;
@@ -55,8 +56,7 @@ pub fn list(conn: &Connection) -> AppResult<Vec<ProviderListItem>> {
 }
 
 pub fn get(conn: &Connection, id: &str) -> AppResult<Option<Provider>> {
-    let mut stmt =
-        conn.prepare(&format!("SELECT {COLS} FROM providers WHERE id = ?1"))?;
+    let mut stmt = conn.prepare(&format!("SELECT {COLS} FROM providers WHERE id = ?1"))?;
     let found = stmt.query_row(params![id], row_to_provider).optional()?;
     Ok(found)
 }
@@ -137,9 +137,7 @@ pub fn save(conn: &Connection, input: &SaveInput) -> AppResult<()> {
         )?;
     } else {
         conn.execute(
-            &format!(
-                "INSERT INTO providers ({COLS}) VALUES (?1,?2,?3,?4,?5,?6,?8,?7,?7)"
-            ),
+            &format!("INSERT INTO providers ({COLS}) VALUES (?1,?2,?3,?4,?5,?6,?8,?7,?7)"),
             params![
                 input.id,
                 input.name,
@@ -202,8 +200,10 @@ mod tests {
     }
 
     fn key_of(conn: &rusqlite::Connection, id: &str) -> String {
-        conn.query_row("SELECT api_key FROM providers WHERE id = ?1", [id], |r| r.get(0))
-            .unwrap()
+        conn.query_row("SELECT api_key FROM providers WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .unwrap()
     }
 
     #[test]

@@ -32,6 +32,12 @@ pub struct QueueState {
     pub inflight: Arc<tokio::sync::Semaphore>,
 }
 
+impl Default for QueueState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl QueueState {
     pub fn new() -> Self {
         QueueState {
@@ -61,12 +67,17 @@ fn dispatch_producer<'a>(
 ) -> Pin<Box<dyn Future<Output = AppResult<ImageOut>> + Send + 'a>> {
     match producer {
         ImageProducer::Protocol(Protocol::OpenAiImages) => Box::pin(adapters::openai_images(ctx)),
-        ImageProducer::Protocol(Protocol::OpenAiChatImage) => Box::pin(adapters::openai_chat_image(ctx)),
-        ImageProducer::Protocol(Protocol::GeminiNative) => Box::pin(adapters::gemini_native(ctx)),
-        ImageProducer::Protocol(Protocol::MidjourneyProxy) => Box::pin(adapters::midjourney_proxy(ctx)),
-        ImageProducer::MjAction { mj_task_id, command } => {
-            Box::pin(adapters::midjourney_action(ctx, mj_task_id, command))
+        ImageProducer::Protocol(Protocol::OpenAiChatImage) => {
+            Box::pin(adapters::openai_chat_image(ctx))
         }
+        ImageProducer::Protocol(Protocol::GeminiNative) => Box::pin(adapters::gemini_native(ctx)),
+        ImageProducer::Protocol(Protocol::MidjourneyProxy) => {
+            Box::pin(adapters::midjourney_proxy(ctx))
+        }
+        ImageProducer::MjAction {
+            mj_task_id,
+            command,
+        } => Box::pin(adapters::midjourney_action(ctx, mj_task_id, command)),
     }
 }
 
@@ -151,12 +162,23 @@ pub(crate) fn count_done(conn: &rusqlite::Connection, task_id: &str) -> u32 {
     .unwrap_or(0)
 }
 
-pub(crate) fn emit_progress(app: &AppHandle, db: &Db, task_id: &str, status: &str, error: Option<String>, image: Option<ImageMeta>) {
+pub(crate) fn emit_progress(
+    app: &AppHandle,
+    db: &Db,
+    task_id: &str,
+    status: &str,
+    error: Option<String>,
+    image: Option<ImageMeta>,
+) {
     let (done, total) = {
         let conn = db.conn();
         let done = count_done(&conn, task_id);
         let total: u32 = conn
-            .query_row("SELECT total FROM tasks WHERE id = ?1", params![task_id], |r| r.get(0))
+            .query_row(
+                "SELECT total FROM tasks WHERE id = ?1",
+                params![task_id],
+                |r| r.get(0),
+            )
             .unwrap_or(0);
         (done, total)
     };
@@ -173,7 +195,13 @@ pub(crate) fn emit_progress(app: &AppHandle, db: &Db, task_id: &str, status: &st
     );
 }
 
-pub(crate) fn finish_task(app: &AppHandle, db: &Db, task_id: &str, status: &str, error: Option<String>) {
+pub(crate) fn finish_task(
+    app: &AppHandle,
+    db: &Db,
+    task_id: &str,
+    status: &str,
+    error: Option<String>,
+) {
     let result = {
         let conn = db.conn();
         finish_task_row(&conn, task_id, status, error.clone())
@@ -291,7 +319,11 @@ pub(crate) async fn run_one_core(
                 inserted.map_err(|e| {
                     AppError::Db(format!("图片已保存到 {path}，但写入画廊失败：{e}"))
                 })?;
-                return Ok(Some(ImageMeta { id: img_id, path, thumb_path }));
+                return Ok(Some(ImageMeta {
+                    id: img_id,
+                    path,
+                    thumb_path,
+                }));
             }
             Err(e) => {
                 last_err = e.to_string();
@@ -378,9 +410,17 @@ pub fn finish_task_row(
 
 pub fn read_file_b64(images_root: &Path, rel_or_abs: &str) -> AppResult<String> {
     let path = PathBuf::from(rel_or_abs);
-    let path = if path.is_absolute() { path } else { images_root.join(rel_or_abs) };
-    let canonical = path.canonicalize().map_err(|e| AppError::General(e.to_string()))?;
-    let root_canonical = images_root.canonicalize().unwrap_or_else(|_| images_root.to_path_buf());
+    let path = if path.is_absolute() {
+        path
+    } else {
+        images_root.join(rel_or_abs)
+    };
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| AppError::General(e.to_string()))?;
+    let root_canonical = images_root
+        .canonicalize()
+        .unwrap_or_else(|_| images_root.to_path_buf());
     if !canonical.starts_with(&root_canonical) {
         return Err(AppError::General("路径越界".into()));
     }
@@ -463,7 +503,10 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         let err = insert_image(&conn, &sample("img-2", "task-1")).unwrap_err();
         assert!(matches!(err, AppError::Db(_)), "实际：{err}");
-        assert!(!err.is_retryable(), "重试整条 adapter 会重复扣费，入库失败一律不可重试");
+        assert!(
+            !err.is_retryable(),
+            "重试整条 adapter 会重复扣费，入库失败一律不可重试"
+        );
     }
 
     #[test]
@@ -477,7 +520,8 @@ mod tests {
     fn finish_task_row_writes_status() {
         let conn = Connection::open_in_memory().unwrap();
         crate::storage::init(&conn).unwrap();
-        let task_id = crate::generate::create_task(&conn, None, "p-1", "openai_images", "{}", 1).unwrap();
+        let task_id =
+            crate::generate::create_task(&conn, None, "p-1", "openai_images", "{}", 1).unwrap();
         finish_task_row(&conn, &task_id, "failed", Some("上游炸了".into())).unwrap();
         let (status, error): (String, Option<String>) = conn
             .query_row(
@@ -498,7 +542,9 @@ mod tests {
         let n = reclaim_orphan_tasks(&conn).unwrap();
         assert_eq!(n, 1);
         let status: String = conn
-            .query_row("SELECT status FROM tasks WHERE id = ?1", ["t-empty"], |r| r.get(0))
+            .query_row("SELECT status FROM tasks WHERE id = ?1", ["t-empty"], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(status, "canceled");
     }
@@ -545,7 +591,11 @@ mod tests {
         session_row(&conn);
         let id = create_task(&conn, Some("s1"), "p-1", "openai_images", "{}", 1).unwrap();
         let sid: Option<String> = conn
-            .query_row("SELECT session_id FROM tasks WHERE id=?1", [id.as_str()], |r| r.get(0))
+            .query_row(
+                "SELECT session_id FROM tasks WHERE id=?1",
+                [id.as_str()],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(sid.as_deref(), Some("s1"));
     }
@@ -557,7 +607,11 @@ mod tests {
         crate::storage::init(&conn).unwrap();
         let id = create_task(&conn, None, "p-1", "openai_images", "{}", 1).unwrap();
         let sid: Option<String> = conn
-            .query_row("SELECT session_id FROM tasks WHERE id=?1", [id.as_str()], |r| r.get(0))
+            .query_row(
+                "SELECT session_id FROM tasks WHERE id=?1",
+                [id.as_str()],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(sid, None);
     }
@@ -579,12 +633,19 @@ mod tests {
         crate::storage::init(&conn).unwrap();
         session_row(&conn);
         let id = create_task(&conn, Some("s1"), "p-1", "openai_images", "{}", 1).unwrap();
-        conn.execute("DELETE FROM sessions WHERE id='s1'", []).unwrap();
+        conn.execute("DELETE FROM sessions WHERE id='s1'", [])
+            .unwrap();
         let sid: Option<String> = conn
-            .query_row("SELECT session_id FROM tasks WHERE id=?1", [id.as_str()], |r| r.get(0))
+            .query_row(
+                "SELECT session_id FROM tasks WHERE id=?1",
+                [id.as_str()],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(sid, None, "删会话只清归属，任务与图片都要留下");
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0)).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(count, 1);
     }
 }

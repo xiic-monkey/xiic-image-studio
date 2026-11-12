@@ -46,10 +46,14 @@ pub struct PromptSaveInput {
 pub fn prompt_save(db: State<Db>, prompt: PromptSaveInput) -> AppResult<String> {
     let now = chrono::Utc::now().to_rfc3339();
     let tags_json = serde_json::to_string(&prompt.tags).unwrap_or_default();
-    let id = prompt.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let id = prompt
+        .id
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let conn = db.conn();
     let exists: Option<String> = conn
-        .query_row("SELECT id FROM prompts WHERE id = ?1", params![id], |r| r.get(0))
+        .query_row("SELECT id FROM prompts WHERE id = ?1", params![id], |r| {
+            r.get(0)
+        })
         .optional()?;
     if exists.is_some() {
         conn.execute(

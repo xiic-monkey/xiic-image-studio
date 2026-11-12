@@ -1,6 +1,6 @@
 use std::io::{BufRead, BufReader, Read, Write};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use serde_json::Value;
 
 const MAX_MCP_MESSAGE_BYTES: usize = 16 * 1024 * 1024;

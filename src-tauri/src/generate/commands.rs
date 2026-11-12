@@ -1,8 +1,8 @@
 use crate::error::{AppError, AppResult};
 use crate::generate::pipeline;
 use crate::generate::types::{
-    GenerateRequest, ImageMeta, ImageProducer, MAX_N, TaskItem, build_mj_action_request_json,
-    build_request_json, clamp_n,
+    build_mj_action_request_json, build_request_json, clamp_n, GenerateRequest, ImageMeta,
+    ImageProducer, TaskItem, MAX_N,
 };
 use crate::generate::{self, QueueState};
 use crate::provider::db as provider_db;
@@ -45,17 +45,17 @@ pub fn submit_task(app: &AppHandle, mut request: GenerateRequest) -> AppResult<S
     let request_json = build_request_json(&request, n);
     let task = {
         let conn = db.conn();
-        pipeline::prepare_task(
-            &conn,
-            request.session_id.as_deref(),
-            &provider,
+        let spec = pipeline::TaskSpec {
+            session_id: request.session_id.as_deref(),
+            provider: &provider,
             n,
-            &request_json,
-            ImageProducer::Protocol(provider.protocol),
+            request_json: &request_json,
+            producer: ImageProducer::Protocol(provider.protocol),
             ctx,
             prompt,
-            provider.model.clone(),
-        )?
+            model: provider.model.clone(),
+        };
+        pipeline::prepare_task(&conn, spec)?
     };
     let task_id = task.task_id.clone();
     pipeline::spawn_task(app.clone(), task);
@@ -197,7 +197,8 @@ pub async fn mj_action(
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        let (params_json, parent_task_id) = row.ok_or_else(|| AppError::General("图片不存在".into()))?;
+        let (params_json, parent_task_id) =
+            row.ok_or_else(|| AppError::General("图片不存在".into()))?;
         let params: serde_json::Value = serde_json::from_str(&params_json).unwrap_or_default();
         let mj_task_id = params["mj_task_id"]
             .as_str()
@@ -235,20 +236,23 @@ pub async fn mj_action(
     };
     let ctx = pipeline::build_ctx(&provider, key, &req, &prompt);
     let request_json = build_mj_action_request_json(&command, &mj_task_id);
-    let producer = ImageProducer::MjAction { mj_task_id, command: command.clone() };
+    let producer = ImageProducer::MjAction {
+        mj_task_id,
+        command: command.clone(),
+    };
     let task = {
         let conn = db.conn();
-        pipeline::prepare_task(
-            &conn,
-            parent_session_id.as_deref(),
-            &provider,
-            1,
-            &request_json,
+        let spec = pipeline::TaskSpec {
+            session_id: parent_session_id.as_deref(),
+            provider: &provider,
+            n: 1,
+            request_json: &request_json,
             producer,
             ctx,
             prompt,
-            provider.model.clone(),
-        )?
+            model: provider.model.clone(),
+        };
+        pipeline::prepare_task(&conn, spec)?
     };
     let task_id = task.task_id.clone();
     pipeline::spawn_task(app.clone(), task);

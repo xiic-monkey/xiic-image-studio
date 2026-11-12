@@ -111,7 +111,9 @@ pub fn image_reveal(app: AppHandle, id: String, db: State<Db>) -> AppResult<()> 
     use tauri_plugin_opener::OpenerExt;
     let conn = db.conn();
     let path: String = conn
-        .query_row("SELECT path FROM images WHERE id = ?1", params![id], |r| r.get(0))
+        .query_row("SELECT path FROM images WHERE id = ?1", params![id], |r| {
+            r.get(0)
+        })
         .optional()?
         .ok_or_else(|| AppError::General("图片不存在".into()))?;
     drop(conn);

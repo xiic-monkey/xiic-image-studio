@@ -6,14 +6,14 @@
 
 use crate::error::AppResult;
 use crate::generate::types::{
-    FANOUT, GenCtx, GenerateRequest, ImageMeta, ImageProducer, TaskOutcome, TaskRequest,
+    GenCtx, GenerateRequest, ImageMeta, ImageProducer, TaskOutcome, TaskRequest, FANOUT,
 };
 use crate::provider::types::Provider;
 use crate::storage::Db;
 use futures::stream::{self, StreamExt};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 use tokio::runtime::Runtime;
 
@@ -57,18 +57,30 @@ pub fn build_ctx(provider: &Provider, key: String, req: &GenerateRequest, prompt
     }
 }
 
+/// prepare_task 的入参：9 个位置参数在调用点看不出谁是谁，聚合后调用方可读。
+pub struct TaskSpec<'a> {
+    pub session_id: Option<&'a str>,
+    pub provider: &'a Provider,
+    pub n: u32,
+    pub request_json: &'a str,
+    pub producer: ImageProducer,
+    pub ctx: GenCtx,
+    pub prompt: String,
+    pub model: String,
+}
+
 /// 唯一建任务行的地方：写会话归属，返回可直接交给编排层的 TaskRequest。
-pub fn prepare_task(
-    conn: &rusqlite::Connection,
-    session_id: Option<&str>,
-    provider: &Provider,
-    n: u32,
-    request_json: &str,
-    producer: ImageProducer,
-    ctx: GenCtx,
-    prompt: String,
-    model: String,
-) -> AppResult<TaskRequest> {
+pub fn prepare_task(conn: &rusqlite::Connection, spec: TaskSpec<'_>) -> AppResult<TaskRequest> {
+    let TaskSpec {
+        session_id,
+        provider,
+        n,
+        request_json,
+        producer,
+        ctx,
+        prompt,
+        model,
+    } = spec;
     let task_id = super::create_task(
         conn,
         session_id,
@@ -77,11 +89,22 @@ pub fn prepare_task(
         request_json,
         n,
     )?;
-    Ok(TaskRequest { task_id, n, prompt, model, ctx, producer })
+    Ok(TaskRequest {
+        task_id,
+        n,
+        prompt,
+        model,
+        ctx,
+        producer,
+    })
 }
 
 /// 任务终态：取消优先；全错才算 failed，出过图就是 completed(_with_errors)。
-pub(crate) fn aggregate_status(image_count: usize, error_count: usize, canceled: bool) -> &'static str {
+pub(crate) fn aggregate_status(
+    image_count: usize,
+    error_count: usize,
+    canceled: bool,
+) -> &'static str {
     if canceled {
         "canceled"
     } else if error_count == 0 {
@@ -109,7 +132,12 @@ pub fn spawn_task(app: AppHandle, req: TaskRequest) {
 }
 
 /// 无头 MCP：在 stdio 进程的 Runtime 上跑完，结果直接回 tools/call 响应。
-pub fn run_task_headless(db: &Db, images_dir: &Path, runtime: &Runtime, req: &TaskRequest) -> TaskOutcome {
+pub fn run_task_headless(
+    db: &Db,
+    images_dir: &Path,
+    runtime: &Runtime,
+    req: &TaskRequest,
+) -> TaskOutcome {
     runtime.block_on(execute(db, images_dir, req, RunMode::Headless))
 }
 
@@ -188,14 +216,18 @@ async fn execute(db: &Db, images_dir: &Path, req: &TaskRequest, mode: RunMode) -
         Some(app) => super::finish_task(app, db, &req.task_id, status, errors.first().cloned()),
         None => {
             let conn = db.conn();
-            if let Err(e) = super::finish_task_row(&conn, &req.task_id, status, errors.first().cloned()) {
+            if let Err(e) =
+                super::finish_task_row(&conn, &req.task_id, status, errors.first().cloned())
+            {
                 // 图已经生成（已扣费），记账失败只能作为 warning 返回，不能丢掉结果
                 db_error = Some(e.to_string());
             }
         }
     }
     if let Some(app) = &app {
-        app.state::<super::QueueState>().cancels().remove(&req.task_id);
+        app.state::<super::QueueState>()
+            .cancels()
+            .remove(&req.task_id);
     }
 
     TaskOutcome {
@@ -287,20 +319,23 @@ mod tests {
         let p = provider();
         let r = request();
         let ctx = build_ctx(&p, "sk".into(), &r, "cat");
-        let task = prepare_task(
-            &conn,
-            r.session_id.as_deref(),
-            &p,
-            2,
-            "{}",
-            ImageProducer::Protocol(Protocol::OpenAiImages),
+        let spec = TaskSpec {
+            session_id: r.session_id.as_deref(),
+            provider: &p,
+            n: 2,
+            request_json: "{}",
+            producer: ImageProducer::Protocol(Protocol::OpenAiImages),
             ctx,
-            "cat".into(),
-            p.model.clone(),
-        )
-        .unwrap();
+            prompt: "cat".into(),
+            model: p.model.clone(),
+        };
+        let task = prepare_task(&conn, spec).unwrap();
         let sid: Option<String> = conn
-            .query_row("SELECT session_id FROM tasks WHERE id=?1", [task.task_id.as_str()], |r| r.get(0))
+            .query_row(
+                "SELECT session_id FROM tasks WHERE id=?1",
+                [task.task_id.as_str()],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(sid.as_deref(), Some("s1"));
         assert_eq!(task.n, 2);

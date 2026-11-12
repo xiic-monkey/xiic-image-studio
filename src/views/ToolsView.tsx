@@ -39,7 +39,6 @@ export default function ToolsView() {
 
   useEffect(() => {
     results.forEach(loadUrl);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [results]);
 
   const run = async (fn: () => Promise<string | string[]>) => {

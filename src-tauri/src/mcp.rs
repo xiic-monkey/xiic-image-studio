@@ -16,18 +16,18 @@ use std::io::{self, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::Connection;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::runtime::Runtime;
 
 use crate::error::{AppError, AppResult};
 use crate::generate::pipeline;
-use crate::generate::types::{
-    GenerateRequest, ImageProducer, MCP_MAX_N, build_request_json, clamp_n,
-};
 use crate::generate::read_file_b64;
-use crate::mcp_protocol::{MessageFraming, read_message, write_message};
+use crate::generate::types::{
+    build_request_json, clamp_n, GenerateRequest, ImageProducer, MCP_MAX_N,
+};
+use crate::mcp_protocol::{read_message, write_message, MessageFraming};
 use crate::provider::db as provider_db;
 use crate::storage::{self, Db};
 
@@ -149,7 +149,10 @@ fn call_tool(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let arguments = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
 
     match name.as_str() {
         "list_providers" => {
@@ -167,7 +170,11 @@ fn call_tool(
                             "- {} [{}] model={} key={}",
                             p.name,
                             p.protocol.as_str(),
-                            if p.model.is_empty() { "默认" } else { &p.model },
+                            if p.model.is_empty() {
+                                "默认"
+                            } else {
+                                &p.model
+                            },
                             if p.has_key { "已配置" } else { "未配置" }
                         )
                     })
@@ -191,12 +198,7 @@ fn call_tool(
 }
 
 /// 生成：与 GUI 共用 prepare_task + run_task_headless，落库、落盘、收尾全在编排层。
-fn generate(
-    db: &Db,
-    images_dir: &Path,
-    runtime: &Runtime,
-    arguments: Value,
-) -> Result<Value> {
+fn generate(db: &Db, images_dir: &Path, runtime: &Runtime, arguments: Value) -> Result<Value> {
     let prompt = arguments
         .get("prompt")
         .and_then(|v| v.as_str())
@@ -226,7 +228,11 @@ fn generate(
                 .ok_or_else(|| {
                     anyhow!(
                         "找不到 provider '{hint}'（可用：{}）",
-                        items.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join("、")
+                        items
+                            .iter()
+                            .map(|p| p.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join("、")
                     )
                 })?,
             None => items.iter().find(|p| p.has_key).ok_or_else(|| {
@@ -247,8 +253,14 @@ fn generate(
         provider_id: provider.id.clone(),
         prompt: prompt.clone(),
         n,
-        size: arguments.get("size").and_then(|v| v.as_str()).map(|s| s.to_string()),
-        quality: arguments.get("quality").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        size: arguments
+            .get("size")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        quality: arguments
+            .get("quality")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         seed: arguments.get("seed").and_then(|v| v.as_u64()),
         refs: Vec::new(),
         mask: None,
@@ -260,17 +272,17 @@ fn generate(
     let request_json = build_request_json(&req, n);
     let task = {
         let conn = db.conn();
-        pipeline::prepare_task(
-            &conn,
-            None,
-            &provider,
+        let spec = pipeline::TaskSpec {
+            session_id: None,
+            provider: &provider,
             n,
-            &request_json,
-            ImageProducer::Protocol(provider.protocol),
+            request_json: &request_json,
+            producer: ImageProducer::Protocol(provider.protocol),
             ctx,
             prompt,
-            provider.model.clone(),
-        )?
+            model: provider.model.clone(),
+        };
+        pipeline::prepare_task(&conn, spec)?
     };
     let outcome = pipeline::run_task_headless(db, images_dir, runtime, &task);
 
@@ -334,7 +346,10 @@ fn tool_ok(result: &Value) -> Value {
         task_id
     );
     for img in &images {
-        text.push_str(&format!("\n- file://{}", img["path"].as_str().unwrap_or("")));
+        text.push_str(&format!(
+            "\n- file://{}",
+            img["path"].as_str().unwrap_or("")
+        ));
     }
     if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
         text.push_str(&format!("\n注意：{err}"));

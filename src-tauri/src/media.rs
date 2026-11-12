@@ -1,6 +1,6 @@
 use crate::error::{AppError, AppResult};
 use base64::Engine;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 
 fn tools_dir(app: &AppHandle) -> AppResult<PathBuf> {
@@ -16,14 +16,21 @@ fn tools_dir(app: &AppHandle) -> AppResult<PathBuf> {
 
 /// 用户自定义 ffmpeg 路径（存 app_data/ffmpeg_path.txt，留空=自动查找）
 fn custom_path_file(app: &AppHandle) -> Option<PathBuf> {
-    app.path().app_data_dir().ok().map(|d| d.join("ffmpeg_path.txt"))
+    app.path()
+        .app_data_dir()
+        .ok()
+        .map(|d| d.join("ffmpeg_path.txt"))
 }
 
 fn read_custom_path(app: &AppHandle) -> Option<String> {
     let p = custom_path_file(app)?;
     let s = std::fs::read_to_string(p).ok()?;
     let s = s.trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 /// ffmpeg 查找顺序：用户自定义路径 > 内置 sidecar（exe 同目录）> 应用数据目录 bin/ > Homebrew > PATH
@@ -74,14 +81,19 @@ pub fn tools_set_ffmpeg_path(app: AppHandle, path: String) -> AppResult<serde_js
         let out = std::process::Command::new(&p).arg("-version").output();
         match out {
             Ok(o) if o.status.success() => {}
-            Ok(_) => return Err(AppError::General("该文件无法执行，请确认是 ffmpeg 二进制".into())),
+            Ok(_) => {
+                return Err(AppError::General(
+                    "该文件无法执行，请确认是 ffmpeg 二进制".into(),
+                ))
+            }
             Err(e) => return Err(AppError::General(format!("无法执行: {e}"))),
         }
     }
-    let file = custom_path_file(&app).ok_or_else(|| AppError::General("无法定位应用数据目录".into()))?;
+    let file =
+        custom_path_file(&app).ok_or_else(|| AppError::General("无法定位应用数据目录".into()))?;
     std::fs::write(file, target)?;
     // 清掉编码器缓存，让新的 ffmpeg 生效
-    Ok(tools_status(app)?)
+    tools_status(app)
 }
 
 async fn run_ffmpeg(app: &AppHandle, args: &[String]) -> AppResult<()> {
@@ -91,7 +103,11 @@ async fn run_ffmpeg(app: &AppHandle, args: &[String]) -> AppResult<()> {
         .arg("-y")
         .output()
         .await
-        .map_err(|e| AppError::General(format!("无法启动 ffmpeg: {e}（请确认已安装，或将 ffmpeg 放入应用数据目录 bin/ 下）")))?;
+        .map_err(|e| {
+            AppError::General(format!(
+                "无法启动 ffmpeg: {e}（请确认已安装，或将 ffmpeg 放入应用数据目录 bin/ 下）"
+            ))
+        })?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         return Err(AppError::General(format!(
@@ -102,10 +118,12 @@ async fn run_ffmpeg(app: &AppHandle, args: &[String]) -> AppResult<()> {
     Ok(())
 }
 
+/// (ffmpeg 路径, 编码器列表)
+type EncoderCache = std::sync::OnceLock<std::sync::Mutex<Option<(String, Vec<String>)>>>;
+
 /// 可用的图像编码器（按当前 ffmpeg 路径缓存，切换路径后自动失效）
 fn encoders(app: &AppHandle) -> Vec<String> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<(String, Vec<String>)>>> =
-        std::sync::OnceLock::new();
+    static CACHE: EncoderCache = std::sync::OnceLock::new();
 
     let bin = ffmpeg_bin(app);
     let cache = CACHE.get_or_init(|| std::sync::Mutex::new(None));
@@ -148,23 +166,24 @@ fn encoder_for(format: &str) -> &'static str {
 fn format_supported(app: &AppHandle, format: &str) -> bool {
     let need = encoder_for(format);
     let available = encoders(app);
-    available
-        .iter()
-        .any(|e| e == need || e.contains(need))
+    available.iter().any(|e| e == need || e.contains(need))
 }
 
 fn scale_filter(max_side: Option<u32>) -> Option<String> {
-    max_side.map(|m| {
-        format!("scale='min(iw,{m})':'min(ih,{m})':force_original_aspect_ratio=decrease")
-    })
+    max_side
+        .map(|m| format!("scale='min(iw,{m})':'min(ih,{m})':force_original_aspect_ratio=decrease"))
 }
 
-fn out_path(dir: &PathBuf, src: &str, ext: &str) -> PathBuf {
+fn out_path(dir: &Path, src: &str, ext: &str) -> PathBuf {
     let stem = PathBuf::from(src)
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "out".into());
-    dir.join(format!("{stem}-{}.{}", chrono::Utc::now().timestamp_millis(), ext))
+    dir.join(format!(
+        "{stem}-{}.{}",
+        chrono::Utc::now().timestamp_millis(),
+        ext
+    ))
 }
 
 #[tauri::command]
@@ -182,7 +201,9 @@ pub fn tools_status(app: AppHandle) -> AppResult<serde_json::Value> {
     } else {
         serde_json::json!(null)
     };
-    Ok(serde_json::json!({ "available": available, "path": bin, "source": source, "formats": formats }))
+    Ok(
+        serde_json::json!({ "available": available, "path": bin, "source": source, "formats": formats }),
+    )
 }
 
 /// 格式转换 / 压缩 / 改尺寸
@@ -299,7 +320,12 @@ pub async fn tools_video_frames(
     if let Some(f) = scale_filter(max_side) {
         vf.push_str(&format!(",{f}"));
     }
-    args.extend(["-vf".into(), vf, "-frames:v".into(), max_frames.unwrap_or(12).clamp(1, 60).to_string()]);
+    args.extend([
+        "-vf".into(),
+        vf,
+        "-frames:v".into(),
+        max_frames.unwrap_or(12).clamp(1, 60).to_string(),
+    ]);
     args.push(frame_dir.join("f-%03d.png").to_string_lossy().to_string());
     run_ffmpeg(&app, &args).await?;
 

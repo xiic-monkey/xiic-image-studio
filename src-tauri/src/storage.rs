@@ -1,6 +1,6 @@
 use crate::error::{AppError, AppResult};
 use rusqlite::Connection;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 pub struct Db(pub Mutex<Connection>);
@@ -14,7 +14,7 @@ impl Db {
     }
 }
 
-pub fn db_path(app_dir: &PathBuf) -> PathBuf {
+pub fn db_path(app_dir: &Path) -> PathBuf {
     app_dir.join("image-studio.db")
 }
 
@@ -329,7 +329,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     fn busy_timeout_ms(conn: &Connection) -> i64 {
-        conn.query_row("PRAGMA busy_timeout", [], |r| r.get(0)).unwrap()
+        conn.query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap()
     }
 
     #[test]
@@ -374,7 +375,8 @@ mod tests {
     #[test]
     fn duplicate_column_error_is_recognised() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE t (a TEXT NOT NULL)").unwrap();
+        conn.execute_batch("CREATE TABLE t (a TEXT NOT NULL)")
+            .unwrap();
         let dup = conn
             .execute_batch("ALTER TABLE t ADD COLUMN a TEXT NOT NULL DEFAULT ''")
             .unwrap_err();
@@ -436,10 +438,13 @@ mod tests {
             [],
         )
         .unwrap();
-        conn.execute("DELETE FROM tasks WHERE id = 't1'", []).unwrap();
+        conn.execute("DELETE FROM tasks WHERE id = 't1'", [])
+            .unwrap();
 
         let task_id: Option<String> = conn
-            .query_row("SELECT task_id FROM images WHERE id = 'i1'", [], |r| r.get(0))
+            .query_row("SELECT task_id FROM images WHERE id = 'i1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(task_id, None, "图片要留在画廊里，但不能再指向已删的任务");
         let count: i64 = conn
@@ -520,14 +525,18 @@ mod tests {
             .unwrap();
         assert_eq!(count, 3, "迁移不能丢数据");
         let task_id_of = |id: &str| -> Option<String> {
-            conn.query_row("SELECT task_id FROM images WHERE id = ?1", [id], |r| r.get(0))
-                .unwrap()
+            conn.query_row("SELECT task_id FROM images WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
         };
         assert_eq!(task_id_of("i1").as_deref(), Some("t1"), "合法引用要保留");
         assert_eq!(task_id_of("i2").as_deref(), Some("t2"), "合法引用要保留");
         assert_eq!(task_id_of("i3"), None, "指向已删任务的孤儿引用要清空");
         let session_id: Option<String> = conn
-            .query_row("SELECT session_id FROM tasks WHERE id = 't1'", [], |r| r.get(0))
+            .query_row("SELECT session_id FROM tasks WHERE id = 't1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(session_id, None, "指向已删会话的孤儿引用要清空");
     }

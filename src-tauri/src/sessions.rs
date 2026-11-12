@@ -46,10 +46,14 @@ pub struct SessionSaveInput {
 #[tauri::command]
 pub fn session_save(db: State<Db>, session: SessionSaveInput) -> AppResult<String> {
     let now = chrono::Utc::now().to_rfc3339();
-    let id = session.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let id = session
+        .id
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let conn = db.conn();
     let exists: Option<String> = conn
-        .query_row("SELECT id FROM sessions WHERE id = ?1", params![id], |r| r.get(0))
+        .query_row("SELECT id FROM sessions WHERE id = ?1", params![id], |r| {
+            r.get(0)
+        })
         .optional()?;
     if exists.is_some() {
         conn.execute(
@@ -58,12 +62,7 @@ pub fn session_save(db: State<Db>, session: SessionSaveInput) -> AppResult<Strin
                 draft_json = COALESCE(?3, draft_json),
                 updated_at = ?4
              WHERE id = ?1",
-            params![
-                id,
-                session.name,
-                session.draft.map(|d| d.to_string()),
-                now
-            ],
+            params![id, session.name, session.draft.map(|d| d.to_string()), now],
         )?;
     } else {
         conn.execute(

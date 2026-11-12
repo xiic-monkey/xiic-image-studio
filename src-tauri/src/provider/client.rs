@@ -71,9 +71,7 @@ async fn probe(draft: &ProviderDraft, key: &str) -> AppResult<(u16, String)> {
     }
 
     let (url, authed) = match draft.protocol {
-        Protocol::OpenAiImages | Protocol::OpenAiChatImage => {
-            (join_url(&base, "/v1/models"), true)
-        }
+        Protocol::OpenAiImages | Protocol::OpenAiChatImage => (join_url(&base, "/v1/models"), true),
         Protocol::GeminiNative => (join_url(&base, "/v1beta/models"), false),
         Protocol::MidjourneyProxy => (join_url(&base, "/mj/task/list"), true),
     };
@@ -115,7 +113,12 @@ pub async fn test_connection(draft: &ProviderDraft, key: &str) -> TestResult {
                 let brief = body.chars().take(200).collect::<String>();
                 format!("HTTP {status}: {brief}")
             };
-            TestResult { ok, status: Some(status), message, latency_ms: latency }
+            TestResult {
+                ok,
+                status: Some(status),
+                message,
+                latency_ms: latency,
+            }
         }
         Err(e) => TestResult {
             ok: false,
@@ -193,7 +196,12 @@ pub async fn discover_models(draft: &ProviderDraft, key: &str) -> AppResult<Disc
             })
         }
         Protocol::MidjourneyProxy => Ok(DiscoveredModels {
-            models: vec!["midjourney".into(), "midjourney-relax".into(), "midjourney-fast".into(), "midjourney-turbo".into()],
+            models: vec![
+                "midjourney".into(),
+                "midjourney-relax".into(),
+                "midjourney-fast".into(),
+                "midjourney-turbo".into(),
+            ],
             message: "MJ-Proxy 固定模型名".into(),
         }),
     }

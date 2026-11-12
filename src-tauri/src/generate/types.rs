@@ -2,8 +2,8 @@ use crate::provider::types::Protocol;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RefImage {
@@ -152,7 +152,11 @@ pub struct ImageOut {
 
 impl ImageOut {
     pub fn new(bytes: Vec<u8>, mime: &str) -> Self {
-        ImageOut { bytes, mime: mime.to_string(), meta: None }
+        ImageOut {
+            bytes,
+            mime: mime.to_string(),
+            meta: None,
+        }
     }
 }
 
@@ -206,7 +210,11 @@ mod tests {
             size: Some("1024x1024".into()),
             quality: Some("high".into()),
             seed: Some(42),
-            refs: vec![RefImage { name: "r.png".into(), mime: "image/png".into(), data: "x".into() }],
+            refs: vec![RefImage {
+                name: "r.png".into(),
+                mime: "image/png".into(),
+                data: "x".into(),
+            }],
             mask: None,
             session_id: Some("s1".into()),
         }
@@ -221,7 +229,10 @@ mod tests {
         assert_eq!(v["quality"], "high");
         assert_eq!(v["seed"], 42);
         assert_eq!(v["ref_count"], 1);
-        assert!(v.get("session_id").is_none(), "会话归属走表列，不进 request_json");
+        assert!(
+            v.get("session_id").is_none(),
+            "会话归属走表列，不进 request_json"
+        );
         assert!(v.get("source").is_none());
     }
 
@@ -253,7 +264,11 @@ mod tests {
             size: Some("1:1".into()),
             quality: Some("high".into()),
             seed: Some(7),
-            refs: vec![RefImage { name: "r".into(), mime: "image/png".into(), data: "d".into() }],
+            refs: vec![RefImage {
+                name: "r".into(),
+                mime: "image/png".into(),
+                data: "d".into(),
+            }],
             mask: None,
             cancel: Some(Arc::new(AtomicBool::new(false))),
         };
@@ -266,19 +281,34 @@ mod tests {
         assert_eq!(cloned.quality, ctx.quality);
         assert_eq!(cloned.seed, ctx.seed);
         assert_eq!(cloned.refs.len(), 1);
-        assert!(Arc::ptr_eq(cloned.cancel.as_ref().unwrap(), ctx.cancel.as_ref().unwrap()));
+        assert!(Arc::ptr_eq(
+            cloned.cancel.as_ref().unwrap(),
+            ctx.cancel.as_ref().unwrap()
+        ));
     }
 
     #[test]
     fn image_producer_maps_mj_action_to_midjourney_proxy() {
-        let p = ImageProducer::MjAction { mj_task_id: "t".into(), command: "U1".into() };
+        let p = ImageProducer::MjAction {
+            mj_task_id: "t".into(),
+            command: "U1".into(),
+        };
         assert_eq!(p.protocol().as_str(), "midjourney_proxy");
-        assert_eq!(ImageProducer::Protocol(Protocol::OpenAiImages).protocol().as_str(), "openai_images");
+        assert_eq!(
+            ImageProducer::Protocol(Protocol::OpenAiImages)
+                .protocol()
+                .as_str(),
+            "openai_images"
+        );
     }
 
     #[test]
     fn image_producer_mj_is_not_retryable() {
-        assert!(!ImageProducer::MjAction { mj_task_id: "t".into(), command: "U1".into() }.is_retryable());
+        assert!(!ImageProducer::MjAction {
+            mj_task_id: "t".into(),
+            command: "U1".into()
+        }
+        .is_retryable());
         assert!(!ImageProducer::Protocol(Protocol::MidjourneyProxy).is_retryable());
         assert!(ImageProducer::Protocol(Protocol::OpenAiImages).is_retryable());
     }
