@@ -31,9 +31,11 @@ export default function PromptsView() {
   return (
     <div className="mx-auto max-w-3xl p-6">
       <div className="mb-5 flex items-center gap-3">
-        <h1 className="text-lg font-medium">提示词库</h1>
-        <input className={`${inputCls} w-56`} placeholder="搜索…" value={q} onChange={(e) => setQ(e.target.value)} />
-        <button className="ml-auto rounded-md bg-orange-600 px-4 py-2 text-sm text-white hover:bg-orange-700"
+        <h1 className="shrink-0 text-lg font-medium whitespace-nowrap">提示词库</h1>
+        {/* w-56! 必须带 important：inputCls 里的 w-full 在 Tailwind 产物中排在 w-56 之后，
+            不加 important 搜索框会撑满整行，把标题和按钮压成最小宽度，中文逐字断行。 */}
+        <input className={`${inputCls} w-56!`} placeholder="搜索…" value={q} onChange={(e) => setQ(e.target.value)} />
+        <button className="ml-auto shrink-0 rounded-md bg-orange-600 px-4 py-2 text-sm whitespace-nowrap text-white hover:bg-orange-700"
           onClick={() => setEditing({ title: "", content: "" })}>
           + 新增
         </button>
