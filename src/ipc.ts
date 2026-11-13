@@ -1,6 +1,17 @@
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { listen as tauriListen } from "@tauri-apps/api/event";
+import { hasTauriBridge, NOT_IN_APP_MESSAGE } from "./lib/tauri-env";
 import type { DiscoveredModels, GenerateRequest, GalleryItem, PromptItem, ProviderDraft, ProviderListItem, SaveInput, SessionItem, TaskItem, TaskProgress, TestResult } from "./types";
+
+/**
+ * 预览模式（浏览器里打开 vite 前端、没有 Tauri 外壳）下没有 IPC 桥，
+ * 直接调 invoke 会抛 "Cannot read properties of undefined (reading 'invoke')"。
+ * 这里换成一句能解释现状的话，别让原始报错看起来像程序崩了。
+ */
+function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  if (!hasTauriBridge()) return Promise.reject(new Error(NOT_IN_APP_MESSAGE));
+  return tauriInvoke<T>(cmd, args);
+}
 
 export const api = {
   providerList: () => invoke<ProviderListItem[]>("provider_list"),
@@ -48,5 +59,7 @@ export const api = {
 };
 
 export function onTaskProgress(cb: (p: TaskProgress) => void): Promise<() => void> {
-  return listen<TaskProgress>("task-progress", (e) => cb(e.payload));
+  // 预览模式没有事件通道：返回空取消函数，别制造未捕获的 promise rejection
+  if (!hasTauriBridge()) return Promise.resolve(() => {});
+  return tauriListen<TaskProgress>("task-progress", (e) => cb(e.payload));
 }

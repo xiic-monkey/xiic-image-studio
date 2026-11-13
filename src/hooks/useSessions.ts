@@ -10,19 +10,28 @@ export function useSessions(setNotice: (msg: string | null) => void) {
   // ref 在模拟卸载/重挂之间保留，真正的 tab 切走再回来是新实例，仍会重新拉一次列表。
   const booted = useRef(false);
 
+  // 后端不可达（浏览器预览）或库写失败：说清楚，别留成未捕获的 promise rejection
+  const report = useCallback((e: unknown) => {
+    setNotice(e instanceof Error ? e.message : String(e));
+  }, [setNotice]);
+
   const refresh = useCallback(async (preferId?: string) => {
-    const list = await api.sessionList();
-    setSessions(list);
-    // preferId 缺省时选第一个（挂载 / 删除当前会话后的场景，不依赖闭包里的旧 sessionId）
-    const target = preferId ?? list[0]?.id;
-    if (target && list.some((s) => s.id === target)) {
-      setSessionId(target);
-    } else if (list.length === 0) {
-      const id = await api.sessionSave({ name: "默认会话" });
-      setSessions(await api.sessionList());
-      setSessionId(id);
+    try {
+      const list = await api.sessionList();
+      setSessions(list);
+      // preferId 缺省时选第一个（挂载 / 删除当前会话后的场景，不依赖闭包里的旧 sessionId）
+      const target = preferId ?? list[0]?.id;
+      if (target && list.some((s) => s.id === target)) {
+        setSessionId(target);
+      } else if (list.length === 0) {
+        const id = await api.sessionSave({ name: "默认会话" });
+        setSessions(await api.sessionList());
+        setSessionId(id);
+      }
+    } catch (e) {
+      report(e);
     }
-  }, []);
+  }, [report]);
 
   useEffect(() => {
     if (booted.current) return;
@@ -39,9 +48,13 @@ export function useSessions(setNotice: (msg: string | null) => void) {
     const names = new Set(sessions.map((s) => s.name));
     let i = 1;
     while (names.has(`会话 ${i}`)) i++;
-    const id = await api.sessionSave({ name: `会话 ${i}` });
-    await refresh(id);
-  }, [sessions, refresh]);
+    try {
+      const id = await api.sessionSave({ name: `会话 ${i}` });
+      await refresh(id);
+    } catch (e) {
+      report(e);
+    }
+  }, [sessions, refresh, report]);
 
   const deleteSession = useCallback(
     async (id: string) => {
@@ -50,20 +63,28 @@ export function useSessions(setNotice: (msg: string | null) => void) {
         return;
       }
       if (!confirm("删除该会话？（不影响已生成图片）")) return;
-      await api.sessionDelete(id);
-      // 删的是当前会话 → 选第一个；删的是别的 → 保持在当前
-      await refresh(id === sessionId ? undefined : sessionId);
+      try {
+        await api.sessionDelete(id);
+        // 删的是当前会话 → 选第一个；删的是别的 → 保持在当前
+        await refresh(id === sessionId ? undefined : sessionId);
+      } catch (e) {
+        report(e);
+      }
     },
-    [sessions.length, sessionId, refresh, setNotice],
+    [sessions.length, sessionId, refresh, setNotice, report],
   );
 
   const renameSession = useCallback(
     async (id: string, name: string) => {
       if (!name.trim()) return;
-      await api.sessionSave({ id, name });
-      await refresh(id);
+      try {
+        await api.sessionSave({ id, name });
+        await refresh(id);
+      } catch (e) {
+        report(e);
+      }
     },
-    [refresh],
+    [refresh, report],
   );
 
   return { sessions, sessionId, selectSession, newSession, deleteSession, renameSession, refresh };
