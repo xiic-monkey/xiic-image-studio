@@ -124,7 +124,7 @@ export default function ProviderForm({ editing, onClose }: Props) {
         <div className="space-y-4">
           <div>
             <label className={labelCls}>名称</label>
-            <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} placeholder="如：某中转站-生图" />
+            <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} placeholder="如：OpenAI 官方" />
           </div>
 
           <div>
@@ -141,7 +141,7 @@ export default function ProviderForm({ editing, onClose }: Props) {
           </div>
 
           <div>
-            <label className={labelCls}>Base URL（支持官方或任意中转）</label>
+            <label className={labelCls}>Base URL（官方地址或自建代理均可）</label>
             <div className="flex gap-2">
               <input className={inputCls} value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://..." />
               <button
@@ -183,7 +183,7 @@ export default function ProviderForm({ editing, onClose }: Props) {
 
           <div>
             <div className="flex items-center justify-between">
-              <label className={labelCls}>自定义 Header（中转站特殊鉴权用）</label>
+              <label className={labelCls}>自定义 Header（供应商要求额外鉴权头时用）</label>
               <button className="text-xs text-orange-600 hover:underline" onClick={() => setHeaders([...headers, { k: "", v: "" }])}>
                 + 添加
               </button>
