@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../ipc";
+import { errorMessage } from "../lib/error";
 import type { SessionItem } from "../types";
 
 /** 会话 tab 的 CRUD 与选中态。草稿内容由 useDraft 负责，这里不碰表单。 */
@@ -12,7 +13,7 @@ export function useSessions(setNotice: (msg: string | null) => void) {
 
   // 后端不可达（浏览器预览）或库写失败：说清楚，别留成未捕获的 promise rejection
   const report = useCallback((e: unknown) => {
-    setNotice(e instanceof Error ? e.message : String(e));
+    setNotice(errorMessage(e));
   }, [setNotice]);
 
   const refresh = useCallback(async (preferId?: string) => {

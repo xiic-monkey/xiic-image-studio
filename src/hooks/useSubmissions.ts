@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../ipc";
 import { parseBatch } from "../lib/batch-parse.ts";
 import type { DraftForm } from "../lib/draft.ts";
+import { errorMessage } from "../lib/error";
 import { buildGenerateRequest } from "../lib/request.ts";
 import { canRetry, retryRequest } from "../lib/retry.ts";
 import { buildSubmissions, remainingText } from "../lib/submission.ts";
@@ -79,7 +80,7 @@ export function useSubmissions(ctx: SubmissionContext) {
           optimistic(taskId, s.prompt, req.n, req.seed ?? null, req.session_id ?? null);
           submitted += 1;
         } catch (e) {
-          failMsg = String(e);
+          failMsg = errorMessage(e);
           break;
         }
       }
@@ -103,7 +104,7 @@ export function useSubmissions(ctx: SubmissionContext) {
         ctx.setNotice(`已提交 ${submitted}/${submissions.length} 条，第 ${submitted + 1} 条提交失败：${failMsg}`);
       }
     } catch (e) {
-      ctx.setNotice(String(e));
+      ctx.setNotice(errorMessage(e));
     } finally {
       setSubmitting(false);
     }
@@ -149,13 +150,13 @@ export function useSubmissions(ctx: SubmissionContext) {
           optimistic(taskId, it.prompt, req.n, req.seed ?? null, req.session_id ?? null);
           ok += 1;
         } catch (e) {
-          ctx.setNotice(`批量提交在第 ${ok + 1} 行失败：${String(e)}（已提交 ${ok} 条）`);
+          ctx.setNotice(`批量提交在第 ${ok + 1} 行失败：${errorMessage(e)}（已提交 ${ok} 条）`);
           break;
         }
       }
       if (ok === items.length) ctx.setNotice(`已提交 ${ok} 个批量任务`);
     } catch (e) {
-      ctx.setNotice(`读取/解析失败：${String(e)}`);
+      ctx.setNotice(`读取/解析失败：${errorMessage(e)}`);
     } finally {
       setSubmitting(false);
     }
@@ -174,7 +175,7 @@ export function useSubmissions(ctx: SubmissionContext) {
       optimistic(taskId, t.prompt, req.n, req.seed ?? null, req.session_id ?? null);
       ctx.setNotice("已按原参数重新提交");
     } catch (e) {
-      ctx.setNotice(`重试失败：${String(e)}`);
+      ctx.setNotice(`重试失败：${errorMessage(e)}`);
     }
   };
 

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import Select from "../components/Select";
 import { api } from "../ipc";
+import { errorMessage } from "../lib/error";
 import { usePrefill } from "../stores/prefill";
 
 async function pickPaths(multiple: boolean, patterns: string[]): Promise<string[]> {
@@ -50,7 +51,7 @@ export default function ToolsView() {
       setResults(list);
       setNotice(`完成，共 ${list.length} 个输出`);
     } catch (e) {
-      setNotice(String(e));
+      setNotice(errorMessage(e));
     } finally {
       setBusy(false);
     }
@@ -116,7 +117,7 @@ export default function ToolsView() {
                 setStatus(await api.toolsSetFfmpegPath(customPath));
                 setNotice(customPath ? "已使用自定义路径" : "已恢复自动查找");
               } catch (e) {
-                setNotice(String(e));
+                setNotice(errorMessage(e));
               }
             }}
           >保存</button>

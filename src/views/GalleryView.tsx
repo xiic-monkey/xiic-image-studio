@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../ipc";
+import { errorMessage } from "../lib/error";
 import { usePrefill } from "../stores/prefill";
 import type { GalleryItem } from "../types";
 
@@ -215,7 +216,7 @@ export default function GalleryView() {
                         await api.mjAction(items[preview].id, cmd);
                         setNoticeToast(`已提交 ${cmd}，完成后自动出现在画廊`);
                       } catch (err) {
-                        setNoticeToast(String(err));
+                        setNoticeToast(errorMessage(err));
                       }
                     }}>{cmd}</button>
                 ))}

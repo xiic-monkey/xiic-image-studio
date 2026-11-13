@@ -1,6 +1,7 @@
 import { useState } from "react";
 import Select from "../components/Select";
 import { api } from "../ipc";
+import { errorMessage } from "../lib/error";
 import { useProviders } from "../stores/providers";
 import {
   PROTOCOL_LABELS,
@@ -63,7 +64,7 @@ export default function ProviderForm({ editing, onClose }: Props) {
     try {
       setTestResult(await api.providerTest(draft()));
     } catch (e) {
-      setTestResult({ ok: false, status: null, message: String(e), latency_ms: null });
+      setTestResult({ ok: false, status: null, message: errorMessage(e), latency_ms: null });
     } finally {
       setTesting(false);
     }
@@ -77,7 +78,7 @@ export default function ProviderForm({ editing, onClose }: Props) {
       setModels(res.models);
       setNotice(res.message);
     } catch (e) {
-      setNotice(String(e));
+      setNotice(errorMessage(e));
     } finally {
       setDiscovering(false);
     }
@@ -104,7 +105,7 @@ export default function ProviderForm({ editing, onClose }: Props) {
       await reload();
       onClose();
     } catch (e) {
-      setNotice(String(e));
+      setNotice(errorMessage(e));
     } finally {
       setSaving(false);
     }

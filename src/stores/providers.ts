@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { api } from "../ipc";
+import { errorMessage } from "../lib/error";
 import type { ProviderListItem } from "../types";
 
 interface ProviderState {
@@ -20,9 +21,7 @@ export const useProviders = create<ProviderState>((set) => ({
       const providers = await api.providerList();
       set({ providers, loading: false });
     } catch (e) {
-      // Tauri 命令错误的拒绝值是字符串（AppError 直接序列化成文本），
-      // 而 JS 异常是 Error 对象——分开处理，别让界面上出现 "Error: " 前缀
-      set({ error: e instanceof Error ? e.message : String(e), loading: false });
+      set({ error: errorMessage(e), loading: false });
     }
   },
   remove: async (id) => {
