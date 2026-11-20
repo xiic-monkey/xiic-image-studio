@@ -6,8 +6,9 @@ import { useSessions } from "../hooks/useSessions";
 import { useSubmissions } from "../hooks/useSubmissions";
 import { useTaskFeed } from "../hooks/useTaskFeed";
 import { normalizeQuality, normalizeSize } from "../lib/capabilities";
-import { filesToRefs, MAX_REFS } from "../lib/ref-image";
+import { filesToRefs } from "../lib/ref-image";
 import { pickPrefillPrompt } from "../lib/submission";
+import { useAssets } from "../stores/assets";
 import { usePrefill } from "../stores/prefill";
 import { useProviders } from "../stores/providers";
 import type { TemplateItem } from "../templates";
@@ -28,7 +29,7 @@ export default function WorkbenchView() {
   const { sessions, sessionId, selectSession, newSession, deleteSession, renameSession } = useSessions(setNotice);
   const { form, setForm, patch } = useDraft(sessionId, sessions);
 
-  const [refs, setRefs] = useState<RefImage[]>([]);
+  const { refs, addRefs, removeRef: removeAssetRef, clearRefs: clearAssetRefs } = useAssets();
   const [mask, setMask] = useState<RefImage | null>(null);
   const [maskEditing, setMaskEditing] = useState(false);
   const [tplOpen, setTplOpen] = useState(false);
@@ -43,13 +44,14 @@ export default function WorkbenchView() {
     sessionId,
     upsert,
     patch,
-    clearRefs: () => { setRefs([]); setMask(null); },
+    clearRefs: () => { clearAssetRefs(); setMask(null); },
     setNotice,
   });
 
   const provider = providers.find((p) => p.id === form.providerId);
   const caps = provider?.capabilities;
   const prefill = usePrefill((s) => s.prefill);
+  const clearPrefill = usePrefill((s) => s.clear);
 
   useEffect(() => {
     void load();
@@ -76,15 +78,14 @@ export default function WorkbenchView() {
     if (prefill.quality) patch({ quality: prefill.quality });
     if (prefill.count) patch({ count: prefill.count });
     if (prefill.seed) patch({ seed: prefill.seed });
-    if (prefill.refs?.length) {
-      setRefs((prev) => [...prefill.refs!, ...prev].slice(0, MAX_REFS));
-    }
-  }, [prefill, setForm, patch]);
+    // 用完即弃：工作台随 tab 卸载，不清掉的话下次挂载会再把旧回填灌一遍，
+    // 把用户在此期间改过的提示词覆盖回去。
+    clearPrefill();
+  }, [prefill, setForm, patch, clearPrefill]);
 
   const addFiles = useCallback(async (files: FileList | File[]) => {
-    const newRefs = await filesToRefs(files);
-    setRefs((prev) => [...prev, ...newRefs].slice(0, MAX_REFS));
-  }, []);
+    addRefs(await filesToRefs(files));
+  }, [addRefs]);
 
   // 粘贴图片
   useEffect(() => {
@@ -97,7 +98,7 @@ export default function WorkbenchView() {
   }, [addFiles]);
 
   const removeRef = (i: number) => {
-    setRefs((prev) => prev.filter((_, j) => j !== i));
+    removeAssetRef(i);
     if (i === 0) setMask(null);
   };
 

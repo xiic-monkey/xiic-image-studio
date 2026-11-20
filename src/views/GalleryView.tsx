@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../ipc";
 import { errorMessage } from "../lib/error";
+import { dataUrlToRef, MAX_REFS } from "../lib/ref-image";
+import { useAssets } from "../stores/assets";
+import { useNav } from "../stores/nav";
 import { usePrefill } from "../stores/prefill";
 import type { GalleryItem } from "../types";
 
@@ -12,8 +15,11 @@ export default function GalleryView() {
   const [preview, setPreview] = useState<number>(-1);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [ctx, setCtx] = useState<{ x: number; y: number; id: string } | null>(null);
   const urlCache = useRef<Map<string, string>>(new Map());
   const sendPrefill = usePrefill((s) => s.send);
+  const addRefs = useAssets((s) => s.addRefs);
+  const setTab = useNav((s) => s.setTab);
 
   const setNoticeToast = (msg: string) => {
     setToast(msg);
@@ -123,6 +129,43 @@ export default function GalleryView() {
     });
   };
 
+  const addAsRef = async (it: GalleryItem) => {
+    try {
+      const dataUrl = await api.imageReadB64(it.path);
+      const name = it.path.split("/").pop() || `image-${it.id}`;
+      const added = addRefs([dataUrlToRef(dataUrl, name)]);
+      if (added === 0) {
+        setNoticeToast(`参考图已满，最多 ${MAX_REFS} 张`);
+        return;
+      }
+      // 不在这里提示成功：切到工作台会立刻卸载本视图，提示只会闪一下。
+      // 参考图缩略图出现在工作台，本身就是结果。
+      setTab("workbench");
+    } catch (err) {
+      setNoticeToast(errorMessage(err));
+    }
+  };
+
+  // 右键菜单点外部关闭；画廊滚动时也要关，避免菜单悬在错误的位置
+  useEffect(() => {
+    if (!ctx) return;
+    const close = () => setCtx(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("resize", close);
+    window.addEventListener("keydown", onKey);
+    const scroller = document.getElementById("gallery-scroll");
+    scroller?.addEventListener("scroll", close, true);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("keydown", onKey);
+      scroller?.removeEventListener("scroll", close, true);
+    };
+  }, [ctx]);
+
   const inputCls =
     "rounded-md border border-neutral-300 bg-white px-3 py-2 text-sm focus:border-orange-500 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100";
 
@@ -140,7 +183,7 @@ export default function GalleryView() {
         <span className="ml-auto text-xs text-neutral-400">{items.length} 张</span>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-5">
+      <div id="gallery-scroll" className="flex-1 overflow-y-auto p-5">
         {items.length === 0 && !loading && (
           <p className="py-16 text-center text-sm text-neutral-400">空空如也，先去工作台生成几张</p>
         )}
@@ -148,7 +191,14 @@ export default function GalleryView() {
           {items.map((it, i) => {
             const url = urlCache.current.get(it.thumb_path || it.path);
             return (
-              <div key={it.id} className="group relative overflow-hidden rounded-lg border border-neutral-200 dark:border-neutral-800">
+              <div
+                key={it.id}
+                className="group relative overflow-hidden rounded-lg border border-neutral-200 dark:border-neutral-800"
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setCtx({ x: e.clientX, y: e.clientY, id: it.id });
+                }}
+              >
                 <button className="block w-full cursor-zoom-in" onClick={() => openPreview(i)}>
                   {url ? (
                     <img src={url} className="aspect-square w-full object-cover transition-transform group-hover:scale-[1.03]" alt="" />
@@ -169,6 +219,29 @@ export default function GalleryView() {
         </div>
       </div>
 
+      {/* 右键菜单 */}
+      {ctx && (
+        <div
+          className="fixed z-[70] w-40 rounded-md border border-neutral-200 bg-white py-1 text-sm shadow-lg dark:border-neutral-700 dark:bg-neutral-900"
+          style={{
+            left: Math.min(ctx.x, window.innerWidth - 168),
+            top: Math.min(ctx.y, window.innerHeight - 44),
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            className="block w-full px-3 py-1.5 text-left hover:bg-neutral-100 dark:hover:bg-neutral-800"
+            onClick={() => {
+              const item = items.find((it) => it.id === ctx.id);
+              setCtx(null);
+              if (item) void addAsRef(item);
+            }}
+          >
+            加入参考图
+          </button>
+        </div>
+      )}
+
       {/* 预览 */}
       {toast && (
         <div className="fixed bottom-6 left-1/2 z-[60] -translate-x-1/2 rounded-md bg-neutral-800 px-4 py-2 text-xs text-white shadow-lg">
@@ -188,6 +261,7 @@ export default function GalleryView() {
                 {items[preview].favorite ? "★ 已收藏" : "☆ 收藏"}
               </button>
               <button className="rounded bg-white/10 px-3 py-1.5 hover:bg-white/20" onClick={() => refilling(items[preview])}>回填参数</button>
+              <button className="rounded bg-white/10 px-3 py-1.5 hover:bg-white/20" onClick={() => void addAsRef(items[preview])}>加入参考图</button>
               <button className="rounded bg-white/10 px-3 py-1.5 hover:bg-white/20" onClick={() => api.imageReveal(items[preview].id)}>在 Finder 显示</button>
               <button className="rounded bg-red-500/80 px-3 py-1.5 hover:bg-red-500" onClick={() => remove(items[preview])}>删除</button>
               <button className="rounded bg-white/10 px-3 py-1.5 hover:bg-white/20" onClick={() => setPreview(-1)}>×</button>

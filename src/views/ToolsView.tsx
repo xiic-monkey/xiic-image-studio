@@ -3,7 +3,8 @@ import { open } from "@tauri-apps/plugin-dialog";
 import Select from "../components/Select";
 import { api } from "../ipc";
 import { errorMessage } from "../lib/error";
-import { usePrefill } from "../stores/prefill";
+import { dataUrlToRef } from "../lib/ref-image";
+import { useAssets } from "../stores/assets";
 
 async function pickPaths(multiple: boolean, patterns: string[]): Promise<string[]> {
   const picked = await open({ multiple, filters: [{ name: "files", extensions: patterns }] });
@@ -22,7 +23,7 @@ export default function ToolsView() {
   const [quality, setQuality] = useState(85);
   const [maxSide, setMaxSide] = useState(0);
   const [fps, setFps] = useState(4);
-  const sendPrefill = usePrefill((s) => s.send);
+  const addRefs = useAssets((s) => s.addRefs);
 
   useEffect(() => {
     api.toolsStatus().then(setStatus);
@@ -84,10 +85,9 @@ export default function ToolsView() {
   const asRef = (path: string) => {
     const url = resultUrls[path];
     if (!url) return;
-    const [, data] = url.split(",");
-    const mime = url.slice(5, url.indexOf(";"));
-    // 只送参考图：提示词不参与回填，否则会把工作台里写到一半的提示词清空
-    sendPrefill({ refs: [{ name: path.split("/").pop() ?? "ref.png", mime, data }] });
+    // 只加参考图，不碰提示词：工作台里写到一半的文本不能被覆盖
+    const added = addRefs([dataUrlToRef(url, path.split("/").pop() ?? "ref.png")]);
+    setNotice(added > 0 ? "已加入工作台参考图" : "参考图已满（最多 4 张）");
   };
 
   const cardCls = "rounded-xl border border-neutral-200 p-4 dark:border-neutral-800";

@@ -1,5 +1,4 @@
 import { create } from "zustand";
-import type { RefImage } from "../types";
 
 export interface Prefill {
   prompt?: string;
@@ -7,16 +6,18 @@ export interface Prefill {
   quality?: string;
   count?: number;
   seed?: string;
-  refs?: RefImage[];
   nonce: number;
 }
 
 interface PrefillState {
   prefill: Prefill | null;
   send: (p: Omit<Prefill, "nonce">) => void;
+  /** 消费后清掉：切 tab 会卸载工作台，留着会在下次挂载时又灌一遍旧值。 */
+  clear: () => void;
 }
 
 export const usePrefill = create<PrefillState>((set) => ({
   prefill: null,
   send: (p) => set({ prefill: { ...p, nonce: Date.now() } }),
+  clear: () => set({ prefill: null }),
 }));

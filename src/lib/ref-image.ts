@@ -21,3 +21,27 @@ export async function filesToRefs(files: FileList | File[]): Promise<RefImage[]>
   const imgs = Array.from(files).filter((f) => f.type.startsWith("image/"));
   return Promise.all(imgs.slice(0, MAX_REFS).map(fileToRef));
 }
+
+/**
+ * 把后端 image_read_b64 / ffmpeg 工具返回的 data URL 转成 RefImage。
+ * data 字段不带前缀，mime 单独存，和 fileToRef 的输出保持一致。
+ */
+export function dataUrlToRef(dataUrl: string, name: string): RefImage {
+  const comma = dataUrl.indexOf(",");
+  const head = comma >= 0 ? dataUrl.slice(0, comma) : "";
+  const data = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+  const mime = head.startsWith("data:")
+    ? head.slice(5).split(";")[0] || "image/png"
+    : "image/png";
+  return { name, mime, data };
+}
+
+/** 追加参考图，只收得下的那部分；added 让调用方能提示「满了」而不是静默丢弃。 */
+export function appendRefs(
+  current: RefImage[],
+  incoming: RefImage[],
+): { refs: RefImage[]; added: number } {
+  const room = Math.max(0, MAX_REFS - current.length);
+  const added = Math.min(room, incoming.length);
+  return { refs: [...current, ...incoming.slice(0, added)], added };
+}

@@ -1,12 +1,10 @@
-import { useState } from "react";
 import GalleryView from "./views/GalleryView";
 import PromptsView from "./views/PromptsView";
 import ToolsView from "./views/ToolsView";
 import ProvidersView from "./views/ProvidersView";
 import WorkbenchView from "./views/WorkbenchView";
 import TrafficLights from "./components/TrafficLights";
-
-type Tab = "workbench" | "gallery" | "prompts" | "tools" | "providers";
+import { useNav, type Tab } from "./stores/nav";
 
 // 是否显示前端自绘红绿灯。
 // 当前关闭：窗口已恢复系统原生标题栏 + 系统红绿灯（见 tauri.conf.json 的 decorations:true）。
@@ -22,7 +20,8 @@ const NAV: { key: Tab; label: string; icon: string }[] = [
 ];
 
 export default function App() {
-  const [tab, setTab] = useState<Tab>("workbench");
+  const tab = useNav((s) => s.tab);
+  const setTab = useNav((s) => s.setTab);
 
   return (
     <div className="relative flex h-full overflow-hidden bg-white text-neutral-900 dark:bg-neutral-950 dark:text-neutral-100">

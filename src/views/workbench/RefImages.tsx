@@ -18,7 +18,7 @@ export default function RefImages({
   return (
     <div>
       <div className="flex items-center justify-between">
-        <label className={labelCls}>参考图（最多 4 张，拖拽 / 粘贴 / 点击添加）</label>
+        <label className={labelCls}>参考图（最多 4 张，拖拽 / 粘贴 / 点击添加，或在画廊右键加入）</label>
         {refs.length > 0 && maskEnabled && (
           <button className="text-xs text-orange-600 hover:underline" onClick={onEditMask}>
             {mask ? "重新涂抹" : "涂抹重绘"}
