@@ -146,6 +146,28 @@ export default function GalleryView() {
     }
   };
 
+  // 继续生成：继承这张图的提示词/参数，并把原图作为参考图，跳回工作台再出一版。
+  // 先加参考图、成功后再回填提示词——满 4 张时只提示，不改动用户当前的提示词。
+  const continueGenerating = async (it: GalleryItem) => {
+    try {
+      const dataUrl = await api.imageReadB64(it.path);
+      const name = it.path.split("/").pop() || `image-${it.id}`;
+      const added = addRefs([dataUrlToRef(dataUrl, name)]);
+      if (added === 0) {
+        setNoticeToast(`参考图已满，最多 ${MAX_REFS} 张`);
+        return;
+      }
+      sendPrefill({
+        prompt: it.prompt,
+        size: it.params?.size,
+        quality: it.params?.quality,
+      });
+      setTab("workbench");
+    } catch (err) {
+      setNoticeToast(errorMessage(err));
+    }
+  };
+
   // 右键菜单点外部关闭；画廊滚动时也要关，避免菜单悬在错误的位置
   useEffect(() => {
     if (!ctx) return;
@@ -225,7 +247,7 @@ export default function GalleryView() {
           className="fixed z-[70] w-40 rounded-md border border-neutral-200 bg-white py-1 text-sm shadow-lg dark:border-neutral-700 dark:bg-neutral-900"
           style={{
             left: Math.min(ctx.x, window.innerWidth - 168),
-            top: Math.min(ctx.y, window.innerHeight - 44),
+            top: Math.min(ctx.y, window.innerHeight - 84),
           }}
           onClick={(e) => e.stopPropagation()}
         >
@@ -238,6 +260,16 @@ export default function GalleryView() {
             }}
           >
             加入参考图
+          </button>
+          <button
+            className="block w-full px-3 py-1.5 text-left hover:bg-neutral-100 dark:hover:bg-neutral-800"
+            onClick={() => {
+              const item = items.find((it) => it.id === ctx.id);
+              setCtx(null);
+              if (item) void continueGenerating(item);
+            }}
+          >
+            继续生成
           </button>
         </div>
       )}
@@ -262,6 +294,7 @@ export default function GalleryView() {
               </button>
               <button className="rounded bg-white/10 px-3 py-1.5 hover:bg-white/20" onClick={() => refilling(items[preview])}>回填参数</button>
               <button className="rounded bg-white/10 px-3 py-1.5 hover:bg-white/20" onClick={() => void addAsRef(items[preview])}>加入参考图</button>
+              <button className="rounded bg-orange-600 px-3 py-1.5 hover:bg-orange-500" onClick={() => void continueGenerating(items[preview])}>继续生成</button>
               <button className="rounded bg-white/10 px-3 py-1.5 hover:bg-white/20" onClick={() => api.imageReveal(items[preview].id)}>在 Finder 显示</button>
               <button className="rounded bg-red-500/80 px-3 py-1.5 hover:bg-red-500" onClick={() => remove(items[preview])}>删除</button>
               <button className="rounded bg-white/10 px-3 py-1.5 hover:bg-white/20" onClick={() => setPreview(-1)}>×</button>
