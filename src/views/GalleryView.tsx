@@ -40,8 +40,8 @@ export default function GalleryView() {
     return () => clearTimeout(t);
   }, [reload]);
 
-  // 静默轮询：xiic-image-mcp（外部进程）直接往同一个库写图，发不出前端事件，
-  // 不轮询的话 MCP 生成的图不会出现在这里。只在 id/收藏状态变化时更新，
+  // 静默轮询：外部进程（无头 CLI）直接往同一个库写图，发不出前端事件，
+  // 不轮询的话 CLI 生成的图不会出现在这里。只在 id/收藏状态变化时更新，
   // 既不会打断当前浏览，也不会触发 loading 闪烁。
   useEffect(() => {
     const timer = setInterval(async () => {

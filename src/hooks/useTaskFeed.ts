@@ -108,7 +108,7 @@ export function useTaskFeed() {
     };
 
     void refresh();
-    // 轮询的必要性：外部进程（--mcp 无头模式）直接往同一个 SQLite 写任务，
+    // 轮询的必要性：外部进程（无头 CLI）直接往同一个 SQLite 写任务，
     // 它发不出 tauri 事件，光靠 onTaskProgress 永远发现不了这些任务。
     const timer = setInterval(refresh, 3000);
 

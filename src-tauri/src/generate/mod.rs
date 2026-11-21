@@ -114,7 +114,7 @@ pub(crate) fn save_image(
 
 /// 一条待写入 `images` 表的记录（字段与表列一一对应）。
 ///
-/// 三处写库点（UI 生成、MJ 放大、无头 MCP）以前各写一份 `conn.execute`
+/// 三处写库点（UI 生成、MJ 放大、无头 CLI）以前各写一份 `conn.execute`
 /// 且都 `let _ =` 吞掉错误——图已经在磁盘上，画廊却看不见，用户以为没生成。
 /// 收成一份，并把写失败冒泡给调用方。
 pub(crate) struct NewImage<'a> {
@@ -231,7 +231,7 @@ async fn wait_cancel(cancel: &Arc<AtomicBool>) {
     }
 }
 
-/// 生成一张图并落库——**不依赖 AppHandle**，UI 任务队列与无头 MCP 模式共用。
+/// 生成一张图并落库——**不依赖 AppHandle**，UI 任务队列与无头 CLI 模式共用。
 ///
 /// 两边唯一差别：UI 侧额外 emit 进度事件、走全局并发闸门；无头侧传 `None`
 /// 闸门直接跑。这样"外部调用出的图"和"手动点生成出的图"是同一份代码产出，
@@ -348,7 +348,7 @@ pub(crate) async fn run_one_core(
     Err(AppError::General(last_err))
 }
 
-/// 建一条任务记录（UI 与无头 MCP 共用，保证两边的任务卡片长得一样）。
+/// 建一条任务记录（UI 与无头 CLI 共用，保证两边的任务卡片长得一样）。
 pub fn create_task(
     conn: &rusqlite::Connection,
     session_id: Option<&str>,
@@ -393,7 +393,7 @@ pub fn reclaim_orphan_tasks(conn: &rusqlite::Connection) -> AppResult<u32> {
     Ok(n as u32)
 }
 
-/// 任务收尾（UI 与无头 MCP 共用）。
+/// 任务收尾（UI 与无头 CLI 共用）。
 pub fn finish_task_row(
     conn: &rusqlite::Connection,
     task_id: &str,
@@ -602,7 +602,7 @@ mod tests {
 
     #[test]
     fn create_task_with_null_session_id_succeeds() {
-        // MCP 与旧前端没有会话概念，列必须继续可空
+        // CLI 与旧前端没有会话概念，列必须继续可空
         let conn = Connection::open_in_memory().unwrap();
         crate::storage::init(&conn).unwrap();
         let id = create_task(&conn, None, "p-1", "openai_images", "{}", 1).unwrap();

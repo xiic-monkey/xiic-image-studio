@@ -1,6 +1,6 @@
 # xiic-image-studio 设计文档
 
-> 版本 v0.3 · 2026-11-13 · 状态：MVP + Phase 2 主要功能已实现（含 MCP 无头模式、GUI/MCP/MJ 统一编排层）
+> 版本 v0.4 · 2026-11-21 · 状态：MVP + Phase 2 主要功能已实现（含 CLI 无头模式、GUI/CLI/MJ 统一编排层）
 
 ## 1. 定位
 
@@ -85,20 +85,21 @@ ProviderConfig {
 12. **预设模板库**：内置电商/头像/插画/摄影四类场景模板，工作台「模板」按钮插入（追加到提示词，可选带 size/quality）
 
 ### Phase 3（M5+，已实现）
-13. **MCP 无头模式**：`xiic-image-studio --mcp` 纯 stdio（不占端口、非常驻），对外暴露 `generate_image` / `list_providers`。
+13. **CLI 无头模式**：`xiic-image-studio generate|providers`（不占端口、非常驻），对外暴露
+    `generate`（含 `--ref` 参考图）与 `providers`。
     与 GUI 共用 `pipeline::prepare_task`（唯一建任务行）和 `run_task_headless`，同库、同 adapters、
     同落库规则、同 `images/` 目录；前端靠轮询发现无头进程写入的任务。详见 §10。
 
 ### 参数说明（已对齐实现）
 - **seed（随机种子）**：由「协议 × 模型能力表」（`src-tauri/src/capabilities.rs`）决定是否下发。openai_chat_image 走请求体顶层（Chat Completions 标准参数）；gemini_native 走 `generationConfig.seed`；**openai_images 不下发**（Images API 规范里没有该字段，官方与转 OpenAI 的中转站都会 400）。上游不支持时静默忽略，不影响其他参数。
 - **n（数量）**：前端「数量」选择器 → `pipeline::execute` 按 `0..n` 并发 `buffer_unordered(FANOUT=4)`
-  各生成一张，任务 `total=n`。上限由 `MAX_N=8` 统一裁剪，MCP 工具对外契约单独保留 `MCP_MAX_N=4`。
+  各生成一张，任务 `total=n`。上限由 `MAX_N=8` 统一裁剪（GUI 与 CLI 共用同一上限）。
 - **重试**：仅 `ref_count==0` 且状态为 `failed` / `canceled` / `completed_with_errors` 的任务提供重试入口；
   图生图因参考图未入库，重试会退化，前端据此隐藏入口。重试经 `retryRequest` 复现
   `size` / `quality` / `seed` / `n` 与原会话归属（`session_id`），旧数据无归属时回落到当前会话。
 - **能力表（协议 × 模型）**：`for_model(protocol, model)` 推导该组合实际接受的参数
   （尺寸取值 / 质量取值 / 是否支持 seed、参考图、蒙版 / 上游端点形态）。
-  适配器据此发参，GUI 与 MCP 提交入口据此裁剪请求，前端据此收敛控件并把不支持项置灰。
+  适配器据此发参，GUI 与 CLI 提交入口据此裁剪请求，前端据此收敛控件并把不支持项置灰。
   模型名匹配不到时走宽松兜底行（宁可上游报错，也不静默吞掉用户设的参数）。
   Imagen（`imagen-*`）走 `:predict` 端点分支。
 
@@ -120,13 +121,13 @@ ProviderConfig {
 │ storage 模块    rusqlite (任务/会话/图片元数据)  │
 │ media 模块      image 缩略图 ｜ ffmpeg sidecar  │
 │ crypto 模块     AES-256-GCM 本地密钥             │
-│ mcp 模块        --mcp 无头 stdio（纯 stdio）     │
+│ cli 模块        generate / providers 无头模式   │
 └─────────────────────────────────────────────────┘
 产出 → <data_dir>/images/<task_id>/  本地落盘
 
 三条入口收敛到同一条链路：
   GUI  generate_submit ─┐
-  MCP  tools/call ──────┼─> capabilities::sanitize → build_request_json
+  CLI  generate ─────────┼─> capabilities::sanitize → build_request_json
   MJ   mj_action ───────┘        → pipeline::prepare_task（唯一建任务行）
                                   → pipeline::execute
                                     ├─ RunMode::Gui      emit 进度 / 取消 / 并发闸门 / finish_task
@@ -134,7 +135,7 @@ ProviderConfig {
                                   → mod.rs::run_one_core → adapters 出图 → 落盘 + 落库
 
 无头模式与 GUI 是「两个进程、同一张库、同一个 images 目录」：
-  xiic-image-studio --mcp  ←→  SQLite  ←→  GUI（前端轮询发现新任务）
+  xiic-image-studio generate  ←→  SQLite  ←→  GUI（前端轮询发现新任务）
 ```
 
 ## 7. 数据模型（SQLite）
@@ -154,9 +155,9 @@ prompts     (id, title, content, tags)
   删任务/删会话**不删**图片与任务本身——画廊里的图不该因为清任务队列就没了，
   只是不再声称自己属于某个已删的任务。
 - `tasks.session_id` **真实写入**：GUI 提交与 MJ U/V（继承父任务）带当前会话 id，
-  `pipeline::prepare_task` 把它交给 `create_task` 落库；MCP 与外部 examples 传 `NULL`。
+  `pipeline::prepare_task` 把它交给 `create_task` 落库；CLI 与外部 examples 传 `NULL`。
   删会话后该列被 `ON DELETE SET NULL` 清空，任务仍在。`task_list` **不按 session_id 过滤**——
-  否则 MCP 任务与历史任务会从工作台消失。`TaskItem` 同时回传 `session_id` / `seed`，
+  否则 CLI 任务与历史任务会从工作台消失。`TaskItem` 同时回传 `session_id` / `seed`，
   一键重试据此复现原会话归属与随机种子。
 - `request_json` 由 `build_request_json` 唯一构造，只记 6 个键：`prompt/n/size/quality/seed/ref_count`；
   MJ U/V 用 `build_mj_action_request_json`（`action` + `mj_task_id`，无 prompt → 前端不给重试入口）。
@@ -177,7 +178,7 @@ xiic-image-studio/
 │   ├── provider/{client,commands,db,mod,types}.rs   # 四协议 + 模型发现 + 测试
 │   ├── generate/{adapters,client,commands,mod,types,pipeline}.rs
 │   │       # pipeline = 唯一编排层；mod = 底层原语；adapters = 四协议 + MJ action
-│   ├── mcp.rs / mcp_protocol.rs   # --mcp 无头 stdio 模式
+│   ├── cli.rs                     # generate / providers 无头模式
 │   ├── media.rs                   # ffmpeg sidecar + 缩略图
 │   ├── crypto.rs                  # AES-256-GCM 本地密钥
 │   ├── capabilities.rs            # 协议 × 模型能力表（尺寸/质量/seed/参考图/蒙版/端点），唯一事实源
@@ -207,24 +208,31 @@ xiic-image-studio/
 | **M2 生图核心** | 文生图/图生图 + 任务队列 + 本地落盘 | 中转站真实出图 |
 | **M3 画廊与工作流** | 画廊/搜索/收藏/参数回填 + 多会话 + 提示词库 | 完整日常可用 |
 | **M4 进阶** | 蒙版重绘 + ffmpeg 工具箱 + 批量任务 + MJ U/V | 功能齐（批量为显式开关；文件导入按扩展名判格式，CSV 支持引号字段） |
-| **M5 无头 MCP** | `--mcp` 纯 stdio，对外 `generate_image` / `list_providers` | 外部 agent 能驱动生图、结果进同一画廊 |
-| **M6 统一编排层** | `pipeline.rs` 收编 GUI / MCP / MJ 三条链路；接通 `session_id`；拆工作台、修轮询与草稿竞态；工程化收尾（fmt / clippy / CI / CSP） | 三条入口共用一套建任务与执行语义，`cargo test --lib` / `npm test` / `npm run build` 全绿 |
+| **M5 无头 CLI** | `generate` / `providers` 子命令，对外 `--prompt` / `--ref` / `--json` | 外部 agent 能驱动生图（含以图生图）、结果进同一画廊 |
+| **M6 统一编排层** | `pipeline.rs` 收编 GUI / CLI / MJ 三条链路；接通 `session_id`；拆工作台、修轮询与草稿竞态；工程化收尾（fmt / clippy / CI / CSP） | 三条入口共用一套建任务与执行语义，`cargo test --lib` / `npm test` / `npm run build` 全绿 |
 
-## 10. MCP 无头模式（已实现）
+## 10. CLI 无头模式（已实现）
 
-- 形态：`xiic-image-studio --mcp`，纯 stdio（无 HTTP / SSE / socket / daemon、零端口非常驻）。
-- 入口最简：直连 `src-tauri/target/release/xiic-image-studio`（MCP 配置 `command` 指向该二进制，`args: ["--mcp"]`）。
+- 形态：`xiic-image-studio generate` / `xiic-image-studio providers`，
+  无 HTTP / SSE / socket / daemon、零端口非常驻，跑完即退。
+- 入口最简：直连 `src-tauri/target/release/xiic-image-studio`（skill 的 `scripts/xiic.js`
+  按 `XIIC_IMAGE_STUDIO_BIN` → PATH → release 目录 → `/Applications/...app` 顺序找它）。
   `cargo clean` 后需 `cargo build --release` 恢复。
-- 能力必须是 studio 自己的：`mcp.rs::generate` 与 GUI 的 `generate_submit` 走同一套
+- 能力必须是 studio 自己的：`cli.rs::generate` 与 GUI 的 `generate_submit` 走同一套
   `capabilities::sanitize` → `build_request_json` → `pipeline::prepare_task`（唯一建任务行）；
   执行侧 GUI 走 `spawn_task` / `execute(RunMode::Gui)`，无头走 `run_task_headless` /
   `execute(RunMode::Headless)`，两边最终都落到 `mod.rs::run_one_core`（同库、同 adapters、
   同落库规则、同 images 目录）。**不在外部 crate 复制 DB schema / 解密 / adapters**，
   也**不开 unix socket / HTTP 端口**做 bridge。
 - `RunMode::Headless` 在类型上拿不到 `AppHandle`，误 emit 进度直接编译失败。
-  MCP 不 emit 进度（前端 3s 轮询发现）、不参与 GUI 进程内的 Semaphore（跨进程本就不共享）、
+  CLI 不 emit 进度（前端 3s 轮询发现）、不参与 GUI 进程内的 Semaphore（跨进程本就不共享）、
   也没有取消入口——这三条是**有意保留的差异**，不是没对齐。
-- `request_json` 里旧的 `"source":"mcp"` 键已删除：无人读取，且会让三处入口的归档格式漂移。
+- 输出契约：stdout 只出结果（默认人类可读，`--json` 出结构化），错误一律 stderr + 非零退出码，
+  便于脚本与管道消费。`--json` 结构为 `task_id/status/count/images[{id,path,thumb_path}]`。
+- 参考图（以图生图）：`--ref <path>` 可重复，最多 4 张（与前端 `MAX_REFS` 一致），
+  单张上限 16MB，格式限 png/jpg/jpeg/webp/gif。**CLI 入口按能力表自行拦截**：
+  `caps.refs=false` 的模型（如 dall-e-3、Imagen）带图直接报错，不静默丢弃——
+  见 §12 里 `sanitize()` 不裁 `refs` 那条已知限制。
 - 无头进程与 GUI 是两个进程、写同一张 SQLite：`~/Library/Application Support/com.xiic.image-studio/image-studio.db`
   （无头侧靠 `dirs::data_dir()` + `com.xiic.image-studio` 定位，须与 tauri `app_data_dir()` 一致）。
 - 写库三条硬约束：① 图片必须落在 `<data_dir>/images/<task_id>/`（否则 `image_read_b64` 越界校验拒绝）；
@@ -233,7 +241,15 @@ xiic-image-studio/
 - 前端对无头写入的任务**靠轮询发现**（`useTaskFeed` 3s / Gallery 5s）。指纹由
   `lib/task-signature.ts` 统一计算，含 `errors.length` / `seed` / `sessionId`，
   没变就不 setState；监听注册是异步的，组件卸载时若 `unlisten` 还没返回，
-  Promise resolve 后要立即退订，否则切 tab 往返会累积监听器并对已卸载组件 setState。
+  画廊里的图不该因为清任务队列就消失，删任务只清空归属。
+- **对外形态**：仓库内的 `docs/skill/xiic-image-studio/` 提供一份 agent 可读的 skill
+  （`SKILL.md` + `references/` + `scripts/xiic.js`），按渐进式披露组织：
+  SKILL.md 只留触发条件与最简流程，参数细节下沉到 references/，脚本负责定位二进制并调 CLI。
+  该 skill 与具体 agent 无关，可被任何 agent 装载；仓库内不安装到任何 skills 目录。
+- **MCP 已移除**：早期的 `--mcp` stdio 模式（`mcp.rs` / `mcp_protocol.rs`）已删除，
+  二进制不再识别该参数（传入会明确报错提示改用 CLI 子命令）。
+  迁移：`--mcp` → `generate` 子命令，工具 `generate_image` → `generate --prompt`，
+  工具 `list_providers` → `providers`。
 
 ## 11. 关键决策记录
 
@@ -256,15 +272,15 @@ xiic-image-studio/
 - **锁中毒不 panic**：某条命令 panic 时若正持着库锁，`Mutex` 会被毒化，
   之后所有命令连锁 panic——一次崩溃放大成整条链路失效。
   `Db::conn()` 在毒化时取回锁内连接继续用：毒化只说明上次崩过，不代表数据坏了。
-- **共享编排层收编三条入口**：GUI `generate_submit`、MCP `generate`、MJ `mj_action`
+- **共享编排层收编三条入口**：GUI `generate_submit`、CLI `generate`、MJ `mj_action`
   过去各自做参数裁剪、建任务行、并发与收尾，规则会逐条漂移（MJ U/V 甚至绕过进度、
   取消与全局并发闸门）。现在统一到 `pipeline.rs`：`prepare_task` 是唯一建任务行，
   `execute` 是唯一编排体，`run_one_core` 是唯一出图落库叶子。`ImageProducer`
   把「按协议出图」与「MJ action 出图」收成同一个枚举，重试判定也跟着走同一条规则。
 - **接通 `session_id` 但不过滤**：`tasks.session_id` 以前恒为 NULL（死列）。现在 GUI /
-  MJ 写真实会话、MCP 写 NULL，删会话靠外键置 NULL；`task_list` 仍返回全部任务，
-  否则 MCP 任务与历史任务会从工作台消失。会话归属是「归属信息」，不是「可见性开关」。
-- **MCP 的静默进度与跨进程闸门是有意差异**：无头进程没有 `AppHandle`，也和 GUI
+  MJ 写真实会话、CLI 写 NULL，删会话靠外键置 NULL；`task_list` 仍返回全部任务，
+  否则 CLI 任务与历史任务会从工作台消失。会话归属是「归属信息」，不是「可见性开关」。
+- **CLI 的静默进度与跨进程闸门是有意差异**：无头进程没有 `AppHandle`，也和 GUI
   不共享进程内 Semaphore，强行对齐只会引入假象。能对齐的（参数裁剪、建任务、出图、
   落盘、落库、状态收尾）已经全部对齐。
 - **草稿用内容指纹而不是单布尔开关**：`skipSave` 那种一次性布尔会被任何一次无关
@@ -286,11 +302,12 @@ xiic-image-studio/
   仍未勾选的两步）。
 - **`sanitize()` 不裁 `refs`**：能力表标 `refs=false` 的协议/模型（如 dall-e-3）前端控件会收敛，
   但后端 `sanitize` 目前只裁数值/尺寸/质量/seed/mask，不裁参考图本体。
-  经 MCP 或手写请求传参考图时，适配器仍可能走 `/v1/images/edits` 而上游并不支持。
+  经 CLI 或手写请求传参考图时，适配器仍可能走 `/v1/images/edits` 而上游并不支持。
+  CLI 入口按能力表自行拦截（`caps.refs=false` 且带 `--ref` 直接报错），GUI 侧暂未拦。
 - **`tools_file_b64` 可读任意路径**：工具箱该命令没做 `read_file_b64` 那样的
   `canonicalize()` + 目录越界校验，仅在本机单用户场景可接受；做多用户/分发前必须收紧。
 - **前端无 ESLint / Prettier 配置**：目前靠 TypeScript strict + `noUnusedLocals` +
   `node --test` 兜底；`react-hooks/exhaustive-deps` 一类规则还没纳入检查。
 - **未做运行时冒烟**：GUI（提交→DB `session_id`、删会话置 NULL、重试保留 seed、MJ U/V 进度、
-  dev 控制台 CSP）与 MCP（`cargo build --release` 后 stdio 出图、GUI 3s 轮询发现、DB 为 NULL）
+  dev 控制台 CSP）与 CLI（`cargo build --release` 后出图、GUI 3s 轮询发现、DB 为 NULL）
   两轮人工验收仍需执行。

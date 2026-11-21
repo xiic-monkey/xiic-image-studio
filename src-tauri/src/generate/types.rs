@@ -34,7 +34,7 @@ pub struct GenerateRequest {
     /// 局部重绘蒙版（透明区=重绘区，仅 openai_images 使用）
     #[serde(default)]
     pub mask: Option<RefImage>,
-    /// 当前会话归属；MCP / 旧前端不传时为空（列可空，旧数据兼容）
+    /// 当前会话归属；CLI / 旧前端不传时为空（列可空，旧数据兼容）
     #[serde(default)]
     pub session_id: Option<String>,
 }
@@ -43,9 +43,8 @@ fn default_n() -> u32 {
     1
 }
 
-/// GUI 与 MCP 的提交上限不同：MCP 的 4 是工具对外契约（inputSchema）。
+/// 单任务生成张数上限。GUI 与 CLI 共用同一上限。
 pub const MAX_N: u32 = 8;
-pub const MCP_MAX_N: u32 = 4;
 /// 单任务内同时在飞的上游请求数
 pub const FANOUT: usize = 4;
 
@@ -138,7 +137,7 @@ pub struct TaskItem {
     /// 该任务已生成的图片：刷新窗口后靠它回填缩略图
     /// （实时进度只推送"新生成"的图，历史任务没有这条就永远没缩略图）
     pub images: Vec<ImageMeta>,
-    /// 会话归属；MCP 任务与旧数据为 NULL
+    /// 会话归属；CLI 任务与旧数据为 NULL
     pub session_id: Option<String>,
 }
 
@@ -187,7 +186,7 @@ pub struct TaskRequest {
     pub producer: ImageProducer,
 }
 
-/// 编排层执行结果。MCP 侧靠它组装 tools/call 响应。
+/// 编排层执行结果。CLI 侧靠它组装输出。
 #[derive(Default)]
 pub struct TaskOutcome {
     pub task_id: String,
@@ -249,8 +248,7 @@ mod tests {
     fn clamp_n_never_exceeds_max() {
         assert_eq!(clamp_n(0, MAX_N), 1);
         assert_eq!(clamp_n(99, MAX_N), MAX_N);
-        assert_eq!(clamp_n(99, MCP_MAX_N), MCP_MAX_N);
-        assert_eq!(clamp_n(2, MCP_MAX_N), 2);
+        assert_eq!(clamp_n(2, MAX_N), 2);
     }
 
     #[test]

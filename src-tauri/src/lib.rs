@@ -1,15 +1,13 @@
 // crypto / error / generate / provider / storage 设为 pub：examples/（如 gen_icon、
 // migrate_db）需要复用 app 自己的生成链路与建库迁移来出图、升级库结构。
 pub mod capabilities;
+pub mod cli;
 pub mod crypto;
 pub mod error;
 pub mod generate;
-/// 无头 MCP 模式（`--mcp`）：纯 stdio，不占端口。
-pub mod mcp;
 pub mod provider;
 
 mod gallery;
-mod mcp_protocol;
 mod media;
 mod prompts;
 mod sessions;

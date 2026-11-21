@@ -71,7 +71,7 @@ pub fn get_key(conn: &Connection, id: &str) -> AppResult<Option<String>> {
     }
 }
 
-/// 取 provider 及其**解密后的** api_key（UI 与无头 MCP 模式共用同一条取用路径）。
+/// 取 provider 及其**解密后的** api_key（UI 与无头 CLI 模式共用同一条取用路径）。
 /// key 只在进程内使用，不会随任何对外响应出去。
 pub fn get_with_key(conn: &Connection, id: &str) -> AppResult<Option<(Provider, String)>> {
     let Some(provider) = get(conn, id)? else {

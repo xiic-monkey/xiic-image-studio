@@ -114,7 +114,7 @@ pub fn for_model(protocol: Protocol, model: &str) -> Capabilities {
 }
 
 /// 按能力表裁剪请求：丢弃该协议/模型不支持的参数。
-/// GUI 提交与 MCP 入口都走这里，保证任何一条链路都发不出非法参数。
+/// GUI 提交与 CLI 入口都走这里，保证任何一条链路都发不出非法参数。
 pub fn sanitize(caps: &Capabilities, req: &mut GenerateRequest) {
     req.size = req.size.take().filter(|s| caps.sizes.contains(&s.as_str()));
     req.quality = req

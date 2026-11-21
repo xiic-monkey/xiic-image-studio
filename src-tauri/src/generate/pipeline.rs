@@ -1,4 +1,4 @@
-//! GUI / 无头 MCP / MJ U-V 三条入口共用的任务编排层。
+//! GUI / 无头 CLI / MJ U-V 三条入口共用的任务编排层。
 //!
 //! 底层原语（落库、落盘、适配器）仍在 `super`，这里只负责「建任务之后的全部流程」。
 //! 三处入口的差别收敛成 `RunMode`：无头进程没有 AppHandle，类型上就不可能误发
@@ -31,7 +31,7 @@ impl RunMode {
         }
     }
 
-    /// Semaphore 是进程内的：MCP 与 GUI 是两个进程，本就共享不了，也不能假装在排队。
+    /// Semaphore 是进程内的：CLI 与 GUI 是两个进程，本就共享不了，也不能假装在排队。
     pub(crate) fn inflight(&self) -> Option<Arc<tokio::sync::Semaphore>> {
         match self {
             RunMode::Gui(app) => Some(app.state::<super::QueueState>().inflight.clone()),
@@ -131,7 +131,7 @@ pub fn spawn_task(app: AppHandle, req: TaskRequest) {
     });
 }
 
-/// 无头 MCP：在 stdio 进程的 Runtime 上跑完，结果直接回 tools/call 响应。
+/// 无头 CLI：在自己的 Runtime 上跑完，结果直接回命令行输出。
 pub fn run_task_headless(
     db: &Db,
     images_dir: &Path,
