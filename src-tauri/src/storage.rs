@@ -96,16 +96,60 @@ pub fn init(conn: &Connection) -> AppResult<()> {
             quality TEXT,
             seed INTEGER,
             provider_id TEXT,
+            model_id TEXT,
             created_at TEXT NOT NULL
+        );
+
+        -- 供应商 × 模型 多对多。协议归模型（unique 键含 protocol），
+        -- 同一模型名可按不同协议各存一条；能力仍由 capabilities 动态算，
+        -- 只有用户显式覆写时才落 capabilities_json。
+        CREATE TABLE IF NOT EXISTS models (
+            id TEXT PRIMARY KEY,
+            protocol TEXT NOT NULL,
+            model_name TEXT NOT NULL,
+            label TEXT NOT NULL DEFAULT '',
+            capabilities_json TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            UNIQUE(protocol, model_name)
+        );
+
+        CREATE TABLE IF NOT EXISTS provider_models (
+            provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+            model_id TEXT NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+            is_default INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (provider_id, model_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
         );
 
         CREATE INDEX IF NOT EXISTS idx_images_created ON images(created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_images_task ON images(task_id);
         CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_id);
+        CREATE INDEX IF NOT EXISTS idx_provider_models_model ON provider_models(model_id);
         "#,
     )?;
     migrate_legacy_columns(conn)?;
+    // presets 是后加的表，老库里没有 model_id 列；新表已在 CREATE TABLE 里带上，
+    // add_column_if_absent 对老库补列、对新库 no-op。
+    add_column_if_absent(
+        conn,
+        "presets",
+        "model_id",
+        "ALTER TABLE presets ADD COLUMN model_id TEXT",
+    )?;
+    // models.capabilities_json：用户对单个模型的能力覆写（中转站非标准尺寸用）。
+    add_column_if_absent(
+        conn,
+        "models",
+        "capabilities_json",
+        "ALTER TABLE models ADD COLUMN capabilities_json TEXT NOT NULL DEFAULT ''",
+    )?;
+    migrate_provider_models(conn)?;
     // 外键迁移属于启动期写库：失败不阻断启动（崩在 setup 里，从 Finder 启动只表现为
     // 「双击没反应」），但必须打 stderr——旧结构会继续跑，只是引用完整性没有兜底。
     if let Err(e) = migrate_foreign_keys(conn) {
@@ -131,6 +175,75 @@ fn migrate_legacy_columns(conn: &Connection) -> AppResult<()> {
         "total",
         "ALTER TABLE tasks ADD COLUMN total INTEGER NOT NULL DEFAULT 1",
     )
+}
+
+/// 把旧 providers 行里的 (protocol, model) 拆成 models + provider_models。
+/// 用 meta 表的一次性标记做幂等：迁移只跑一次，跑完即使用户主动解绑了全部关联，
+/// 下次启动也不会重新挂回（不能用「是否有关联」当标记，那样解绑会被当成未迁移）。
+/// INSERT OR IGNORE + 按 UNIQUE(protocol, model_name) 反查，保证 GUI/CLI
+/// 两个进程同时首次启动时也不重复建模型行。
+fn migrate_provider_models(conn: &Connection) -> AppResult<()> {
+    let done: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM meta WHERE key = 'provider_models_migrated'",
+            [],
+            |r| r.get::<_, i64>(0).map(|n| n > 0),
+        )
+        .unwrap_or(false);
+    if done {
+        return Ok(());
+    }
+
+    let legacy: Vec<(String, String, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT p.id, p.protocol, p.model FROM providers p
+             WHERE NOT EXISTS (SELECT 1 FROM provider_models pm WHERE pm.provider_id = p.id)
+             ORDER BY p.created_at ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        out
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    for (pid, protocol, model) in legacy {
+        // 旧供应商没设模型时仍建一条空名模型，保证迁移后仍能出图（能力走宽松兜底）
+        let model_name = if model.trim().is_empty() {
+            String::new()
+        } else {
+            model
+        };
+        let model_id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT OR IGNORE INTO models (id, protocol, model_name, label, created_at)
+             VALUES (?1, ?2, ?3, '', ?4)",
+            rusqlite::params![model_id, protocol, model_name, now],
+        )?;
+        let resolved: String = conn.query_row(
+            "SELECT id FROM models WHERE protocol = ?1 AND model_name = ?2",
+            rusqlite::params![protocol, model_name],
+            |r| r.get(0),
+        )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO provider_models (provider_id, model_id, is_default, created_at)
+             VALUES (?1, ?2, 1, ?3)",
+            rusqlite::params![pid, resolved, now],
+        )?;
+    }
+    // 标记迁移完成。必须在全部成功后写，失败要留到下次重试。
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('provider_models_migrated', ?1)",
+        rusqlite::params![now],
+    )?;
+    Ok(())
 }
 
 /// `table` / `column` / `ddl` 全部来自本模块写死的 `&'static str`，不接受任何外部输入，
@@ -334,7 +447,8 @@ fn is_duplicate_column(e: &rusqlite::Error) -> bool {
 mod tests {
     use super::{
         add_column_if_absent, column_exists, foreign_key_violations, has_foreign_key, init,
-        is_duplicate_column, migrate_foreign_keys, migrate_legacy_columns, Db, BUSY_TIMEOUT_MS,
+        is_duplicate_column, migrate_foreign_keys, migrate_legacy_columns, migrate_provider_models,
+        Db, BUSY_TIMEOUT_MS,
     };
     use rusqlite::Connection;
     use std::sync::{Arc, Mutex};
@@ -559,6 +673,104 @@ mod tests {
         migrate_foreign_keys(&conn).unwrap();
         migrate_foreign_keys(&conn).unwrap();
         assert!(has_foreign_key(&conn, "images", "task_id").unwrap());
+    }
+
+    fn insert_legacy_provider(conn: &Connection, id: &str, protocol: &str, model: &str) {
+        conn.execute(
+            "INSERT INTO providers (id, name, base_url, protocol, model, custom_headers, api_key, created_at, updated_at)
+             VALUES (?1, ?2, 'https://x.test', ?3, ?4, '{}', '', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+            rusqlite::params![id, id, protocol, model],
+        )
+        .unwrap();
+    }
+
+    /// 模拟老库升级：init() 在空库上已写过迁移标记，这里清掉它让迁移真正跑一遍。
+    fn reset_migration_marker(conn: &Connection) {
+        conn.execute_batch("DELETE FROM meta WHERE key = 'provider_models_migrated'")
+            .unwrap();
+    }
+
+    #[test]
+    fn provider_model_migration_splits_legacy_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        init(&conn).unwrap();
+        insert_legacy_provider(&conn, "p1", "openai_images", "gpt-image-1");
+        insert_legacy_provider(&conn, "p2", "gemini_native", "nano-banana");
+        reset_migration_marker(&conn);
+        migrate_provider_models(&conn).unwrap();
+
+        let models: i64 = conn
+            .query_row("SELECT COUNT(*) FROM models", [], |r| r.get(0))
+            .unwrap();
+        let links: i64 = conn
+            .query_row("SELECT COUNT(*) FROM provider_models", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(models, 2, "两条不同的 (protocol, model) 应建两条模型");
+        assert_eq!(links, 2, "每个旧供应商各挂一条默认模型");
+        let default: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM provider_models WHERE is_default = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(default, 2);
+    }
+
+    #[test]
+    fn provider_model_migration_reuses_same_model_across_providers() {
+        let conn = Connection::open_in_memory().unwrap();
+        init(&conn).unwrap();
+        // 两家供应商用同一个 (protocol, model) —— 应复用同一条 model，挂两条关联（多对多）
+        insert_legacy_provider(&conn, "p1", "openai_images", "gpt-image-1");
+        insert_legacy_provider(&conn, "p2", "openai_images", "gpt-image-1");
+        reset_migration_marker(&conn);
+        migrate_provider_models(&conn).unwrap();
+
+        let models: i64 = conn
+            .query_row("SELECT COUNT(*) FROM models", [], |r| r.get(0))
+            .unwrap();
+        let links: i64 = conn
+            .query_row("SELECT COUNT(*) FROM provider_models", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(models, 1, "同一 (protocol, model) 只建一条模型");
+        assert_eq!(links, 2, "两个供应商都关联到这条模型");
+    }
+
+    #[test]
+    fn provider_model_migration_handles_empty_model_and_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        init(&conn).unwrap();
+        insert_legacy_provider(&conn, "p1", "openai_images", "");
+        reset_migration_marker(&conn);
+        migrate_provider_models(&conn).unwrap();
+        let empty_name: String = conn
+            .query_row("SELECT model_name FROM models", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(empty_name, "", "空模型名建兜底行");
+
+        // 重复迁移不再新增（供应商已有链接）
+        migrate_provider_models(&conn).unwrap();
+        let models: i64 = conn
+            .query_row("SELECT COUNT(*) FROM models", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(models, 1);
+    }
+
+    #[test]
+    fn provider_model_migration_keeps_manually_unlinked_providers() {
+        let conn = Connection::open_in_memory().unwrap();
+        init(&conn).unwrap();
+        insert_legacy_provider(&conn, "p1", "openai_images", "gpt-image-1");
+        reset_migration_marker(&conn);
+        migrate_provider_models(&conn).unwrap();
+        // 用户主动解绑后再次迁移，不应把模型挂回来
+        conn.execute_batch("DELETE FROM provider_models").unwrap();
+        migrate_provider_models(&conn).unwrap();
+        let links: i64 = conn
+            .query_row("SELECT COUNT(*) FROM provider_models", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(links, 0, "已有过关联的供应商不该被重新挂模型");
     }
 
     #[test]

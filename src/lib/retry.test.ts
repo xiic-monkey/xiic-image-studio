@@ -48,3 +48,10 @@ test("retryRequest 保留 seed / size / quality / n / sessionId", () => {
 test("旧任务无归属时回落到当前会话", () => {
   assert.equal(retryRequest({ ...task, sessionId: null }, "current-session").session_id, "current-session");
 });
+
+test("retryRequest 复原原任务的 model_id", () => {
+  const req = retryRequest({ ...task, modelId: "m-gpt" }, "current-session");
+  assert.equal(req.model_id, "m-gpt", "重试必须回到原模型，不能跟着当前选择漂移");
+  // 旧任务没有 model_id 时不带字段，由后端回退到默认模型
+  assert.equal(retryRequest(task, "current-session").model_id, undefined);
+});

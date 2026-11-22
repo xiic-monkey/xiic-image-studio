@@ -1,7 +1,7 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
 import { hasTauriBridge, NOT_IN_APP_MESSAGE } from "./lib/tauri-env";
-import type { DiscoveredModels, GenerateRequest, GalleryItem, PresetItem, PromptItem, ProviderDraft, ProviderListItem, SaveInput, SessionItem, TaskItem, TaskProgress, TestResult } from "./types";
+import type { DiscoveredModels, GenerateRequest, GalleryItem, ModelDraft, ModelItem, PresetItem, PromptItem, ProviderDraft, ProviderListItem, SaveInput, SessionItem, TaskItem, TaskProgress, TestResult } from "./types";
 
 /**
  * 预览模式（浏览器里打开 vite 前端、没有 Tauri 外壳）下没有 IPC 桥，
@@ -19,6 +19,13 @@ export const api = {
   providerDelete: (id: string) => invoke<void>("provider_delete", { id }),
   providerTest: (draft: ProviderDraft) => invoke<TestResult>("provider_test", { draft }),
   providerDiscover: (draft: ProviderDraft) => invoke<DiscoveredModels>("provider_discover_models", { draft }),
+  modelList: () => invoke<ModelItem[]>("model_list"),
+  modelListForProvider: (providerId: string) => invoke<ModelItem[]>("model_list_for_provider", { providerId }),
+  modelAdd: (draft: ModelDraft) => invoke<string>("model_add", { draft }),
+  modelDelete: (id: string) => invoke<void>("model_delete", { id }),
+  providerModelAdd: (providerId: string, modelId: string) => invoke<void>("provider_model_add", { providerId, modelId }),
+  providerModelRemove: (providerId: string, modelId: string) => invoke<void>("provider_model_remove", { providerId, modelId }),
+  providerModelSetDefault: (providerId: string, modelId: string) => invoke<void>("provider_model_set_default", { providerId, modelId }),
   generateSubmit: (request: GenerateRequest) => invoke<string>("generate_submit", { request }),
   generateCancel: (taskId: string) => invoke<void>("generate_cancel", { taskId }),
   taskList: (limit?: number) => invoke<TaskItem[]>("task_list", { limit }),
@@ -48,7 +55,7 @@ export const api = {
     invoke<string>("prompt_save", { prompt }),
   promptDelete: (id: string) => invoke<void>("prompt_delete", { id }),
   presetList: () => invoke<PresetItem[]>("preset_list"),
-  presetSave: (preset: { id?: string; name: string; prompt: string; size?: string | null; quality?: string | null; seed?: number | null; provider_id?: string | null }) =>
+  presetSave: (preset: { id?: string; name: string; prompt: string; size?: string | null; quality?: string | null; seed?: number | null; provider_id?: string | null; model_id?: string | null }) =>
     invoke<string>("preset_save", { preset }),
   presetDelete: (id: string) => invoke<void>("preset_delete", { id }),
   sessionList: () => invoke<SessionItem[]>("session_list"),

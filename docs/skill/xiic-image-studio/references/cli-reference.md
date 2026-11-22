@@ -15,6 +15,7 @@ xiic-image-studio generate --prompt <提示词> [选项]
 | `--prompt <文本>` | **必填**。画面描述。空字符串会被拒绝。 |
 | `--ref <图片路径>` | 参考图，可重复。最多 4 张，单张 ≤16MB，格式 png/jpg/jpeg/webp/gif。 |
 | `--provider <名称\|id>` | 不填则用第一个配好 API Key 的。名称大小写不敏感。 |
+| `--model <名称\|id>` | 用该供应商下的哪个模型（模型名或 id）。不传用该供应商的默认模型。指定未关联的模型会报错，不会静默换模型。 |
 | `-n <1..8>` | 生成张数，默认 1。越界自动收敛到 [1, 8]。也接受 `--n` / `--count`。 |
 | `--size <1024x1024>` | 分辨率。**按模型能力表裁剪**：不支持的取值会被静默丢弃。 |
 | `--quality <high>` | 质量档。同样按能力表裁剪。 |
@@ -30,7 +31,10 @@ xiic-image-studio providers [--json]
 ```
 
 列出已配置的 provider：名称、协议、模型、是否已配 Key。`--json` 时输出完整
-`ProviderListItem`（含 `capabilities` 能力表）。
+`ProviderListItem`（含 `capabilities` 能力表与 `model_ids` 关联的模型 id 列表）。
+
+供应商与模型是多对多：供应商只是连接（url/key），模型带协议，一家供应商可挂多个不同协议的模型，
+同一模型也能挂多家供应商。`--model` 指定实际用哪个，协议与能力都从模型解析（不从供应商旧列派生）。
 
 ### `export`
 

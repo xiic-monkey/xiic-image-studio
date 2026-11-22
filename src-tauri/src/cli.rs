@@ -63,6 +63,7 @@ struct GenerateArgs {
     prompt: String,
     refs: Vec<String>,
     provider: Option<String>,
+    model: Option<String>,
     n: Option<u32>,
     size: Option<String>,
     quality: Option<String>,
@@ -100,6 +101,7 @@ fn parse_generate(args: &[String]) -> Result<GenerateArgs> {
             "--prompt" => out.prompt = value_for(args, &mut i, inline, "--prompt")?,
             "--ref" => out.refs.push(value_for(args, &mut i, inline, "--ref")?),
             "--provider" => out.provider = Some(value_for(args, &mut i, inline, "--provider")?),
+            "--model" => out.model = Some(value_for(args, &mut i, inline, "--model")?),
             "-n" | "--n" | "--count" => {
                 let v = value_for(args, &mut i, inline, "-n")?;
                 out.n = Some(
@@ -297,12 +299,25 @@ fn generate(args: &[String]) -> Result<()> {
         (provider, key)
     };
 
+    // 解析供应商 × 模型，与 GUI 共用 model::db::resolve。
+    // --model 可传模型 id；不传则用该供应商的默认模型。
+    let resolved = {
+        let conn = db.conn();
+        crate::model::db::resolve(&conn, &provider.id, parsed.model.as_deref())
+            .map_err(|e| anyhow!("{e}"))?
+    };
     // 与 GUI 同一个裁剪入口；上面的守卫先给出 refs 的明确报错，sanitize 兜底裁剪
-    let caps = crate::capabilities::for_model(provider.protocol, &provider.model);
-    check_refs_supported(&caps, &refs, &provider.name, &provider.model)?;
+    check_refs_supported(
+        &resolved.capabilities,
+        &refs,
+        &provider.name,
+        &resolved.model_name,
+    )?;
 
+    let model_id_for_req = Some(resolved.id.clone());
     let mut req = GenerateRequest {
         provider_id: provider.id.clone(),
+        model_id: model_id_for_req,
         prompt: prompt.clone(),
         n,
         size: parsed.size.clone(),
@@ -312,9 +327,16 @@ fn generate(args: &[String]) -> Result<()> {
         mask: None,
         session_id: None,
     };
-    crate::capabilities::sanitize(&caps, &mut req);
+    crate::capabilities::sanitize(&resolved.capabilities, &mut req);
 
-    let ctx = pipeline::build_ctx(&provider, key, &req, &prompt);
+    let ctx = pipeline::build_ctx(
+        &provider,
+        key,
+        &req,
+        &prompt,
+        &resolved.model_name,
+        resolved.capabilities.clone(),
+    );
     let request_json = build_request_json(&req, n);
     let task = {
         let conn = db.conn();
@@ -323,10 +345,10 @@ fn generate(args: &[String]) -> Result<()> {
             provider: &provider,
             n,
             request_json: &request_json,
-            producer: ImageProducer::Protocol(provider.protocol),
+            producer: ImageProducer::Protocol(resolved.protocol),
             ctx,
             prompt,
-            model: provider.model.clone(),
+            model: resolved.model_name.clone(),
         };
         pipeline::prepare_task(&conn, spec)?
     };
@@ -469,6 +491,7 @@ generate 选项：
   --prompt <文本>        必填，画面描述
   --ref <图片路径>       参考图，可重复（最多 {MAX_REFS} 张，用于以图生图）
   --provider <名称|id>   不填则用第一个已配好 API Key 的
+  --model <模型名>       用该供应商下的哪个模型（id 或名称），不填用默认模型
   -n <1..{MAX_N}>             生成张数，默认 1
   --size <1024x1024>     分辨率（按模型能力裁剪）
   --quality <high>       质量档（按模型能力裁剪）
@@ -559,6 +582,17 @@ mod tests {
         assert_eq!(a.prompt, "猫");
         assert_eq!(a.seed, Some(7));
         assert!(a.json);
+    }
+
+    #[test]
+    fn parses_model_flag() {
+        let a = parse_generate(&args(&["--prompt", "猫", "--model", "m-gpt"])).unwrap();
+        assert_eq!(a.model.as_deref(), Some("m-gpt"));
+        let a2 = parse_generate(&args(&["--prompt=猫", "--model=m-inline"])).unwrap();
+        assert_eq!(a2.model.as_deref(), Some("m-inline"));
+        // 不传时为空，走供应商默认模型
+        let a3 = parse_generate(&args(&["--prompt", "猫"])).unwrap();
+        assert_eq!(a3.model, None);
     }
 
     #[test]

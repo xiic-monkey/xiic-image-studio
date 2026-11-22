@@ -41,11 +41,21 @@ impl RunMode {
 }
 
 /// 从（已按能力表裁剪的）请求构造适配器上下文。
-pub fn build_ctx(provider: &Provider, key: String, req: &GenerateRequest, prompt: &str) -> GenCtx {
+/// model 显式传入（来自供应商×模型关联解析），不再隐式取 provider.model——
+/// 同一供应商可挂多个不同协议/名字的模型，必须让调用方说清楚用哪个。
+/// caps 一并带入：适配器只读不算，避免与提交时的裁剪依据漂移。
+pub fn build_ctx(
+    provider: &Provider,
+    key: String,
+    req: &GenerateRequest,
+    prompt: &str,
+    model: &str,
+    caps: crate::capabilities::Capabilities,
+) -> GenCtx {
     GenCtx {
         base_url: provider.base_url.clone(),
         key,
-        model: provider.model.clone(),
+        model: model.to_string(),
         custom_headers: provider.custom_headers.clone(),
         prompt: prompt.to_string(),
         size: req.size.clone(),
@@ -53,6 +63,7 @@ pub fn build_ctx(provider: &Provider, key: String, req: &GenerateRequest, prompt
         seed: req.seed,
         refs: req.refs.clone(),
         mask: req.mask.clone(),
+        caps,
         cancel: None,
     }
 }
@@ -262,6 +273,7 @@ mod tests {
     fn request() -> GenerateRequest {
         GenerateRequest {
             provider_id: "p1".into(),
+            model_id: None,
             prompt: "  cat  ".into(),
             n: 2,
             size: Some("1024x1024".into()),
@@ -295,7 +307,17 @@ mod tests {
 
     #[test]
     fn build_ctx_maps_all_fields_from_request_and_provider() {
-        let ctx = build_ctx(&provider(), "sk".into(), &request(), "cat");
+        let ctx = build_ctx(
+            &provider(),
+            "sk".into(),
+            &request(),
+            "cat",
+            "gpt-image-1",
+            crate::capabilities::for_model(
+                crate::provider::types::Protocol::OpenAiImages,
+                "gpt-image-1",
+            ),
+        );
         assert_eq!(ctx.base_url, "https://example.com/v1");
         assert_eq!(ctx.key, "sk");
         assert_eq!(ctx.model, "gpt-image-1");
@@ -318,7 +340,17 @@ mod tests {
         .unwrap();
         let p = provider();
         let r = request();
-        let ctx = build_ctx(&p, "sk".into(), &r, "cat");
+        let ctx = build_ctx(
+            &p,
+            "sk".into(),
+            &r,
+            "cat",
+            "gpt-image-1",
+            crate::capabilities::for_model(
+                crate::provider::types::Protocol::OpenAiImages,
+                "gpt-image-1",
+            ),
+        );
         let spec = TaskSpec {
             session_id: r.session_id.as_deref(),
             provider: &p,

@@ -13,11 +13,13 @@ import {
   parseSeedBase,
   remainingText,
 } from "../lib/submission.ts";
-import type { ProviderListItem, RefImage, TaskUpsert, TaskView } from "../types";
+import type { Capabilities, ProviderListItem, RefImage, TaskUpsert, TaskView } from "../types";
 
 export interface SubmissionContext {
   providers: ProviderListItem[];
   providerId: string;
+  /** 当前选中模型的能力（由 WorkbenchView 按选中模型解析，不再取 provider.capabilities） */
+  caps: Capabilities | undefined;
   form: DraftForm;
   refs: RefImage[];
   mask: RefImage | null;
@@ -55,9 +57,10 @@ export function useSubmissions(ctx: SubmissionContext) {
       return;
     }
     const { form } = ctx;
+    const caps = ctx.caps ?? provider.capabilities; // 旧数据兜底：未解析到模型时用 provider 能力
     // 扫描模式按能力表判定：模型不支持 seed 时明确拒绝，
     // 不能静默按「无种子」提交一串重复任务（那是白花钱）。
-    if (form.scanMode && !isSeedEnabled(provider.capabilities)) {
+    if (form.scanMode && !isSeedEnabled(caps)) {
       ctx.setNotice("当前模型不支持种子，无法使用种子扫描");
       return;
     }
@@ -79,6 +82,7 @@ export function useSubmissions(ctx: SubmissionContext) {
           const req = buildGenerateRequest(
             {
               providerId: provider.id,
+              modelId: form.modelId,
               prompt: s.prompt,
               n: s.n,
               size: form.size,
@@ -89,7 +93,7 @@ export function useSubmissions(ctx: SubmissionContext) {
               mask: ctx.mask,
               sessionId: ctx.sessionId,
             },
-            provider.capabilities,
+            caps,
           );
           const taskId = await api.generateSubmit(req);
           optimistic(taskId, s.prompt, req.n, req.seed ?? null, req.session_id ?? null);
@@ -152,6 +156,7 @@ export function useSubmissions(ctx: SubmissionContext) {
           const req = buildGenerateRequest(
             {
               providerId: provider.id,
+              modelId: ctx.form.modelId,
               prompt: it.prompt,
               n: it.n ? Number(it.n) : 1,
               size: it.size || ctx.form.size,
@@ -161,7 +166,7 @@ export function useSubmissions(ctx: SubmissionContext) {
               mask: null,
               sessionId: ctx.sessionId,
             },
-            provider.capabilities,
+            ctx.caps ?? provider.capabilities,
           );
           const taskId = await api.generateSubmit(req);
           optimistic(taskId, it.prompt, req.n, req.seed ?? null, req.session_id ?? null);
@@ -186,7 +191,8 @@ export function useSubmissions(ctx: SubmissionContext) {
     }
     try {
       // 参考图本体没入库，只有 refCount === 0 的任务才会走到这里。
-      const caps = ctx.providers.find((p) => p.id === t.providerId)?.capabilities;
+      // 能力表取当前所选模型；重试请求带任务原 modelId，由后端复原到具体模型。
+      const caps = ctx.caps ?? ctx.providers.find((p) => p.id === t.providerId)?.capabilities;
       const req = retryRequest(t, ctx.sessionId, caps);
       const taskId = await api.generateSubmit(req);
       optimistic(taskId, t.prompt, req.n, req.seed ?? null, req.session_id ?? null);

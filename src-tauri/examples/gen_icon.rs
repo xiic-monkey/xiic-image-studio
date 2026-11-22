@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = GenCtx {
         base_url,
         key,
-        model,
+        model: model.clone(),
         custom_headers: Default::default(),
         prompt: prompt.clone(),
         size: Some(size),
@@ -55,6 +55,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         seed: None,
         refs: Vec::new(),
         mask: None,
+        caps: xiic_image_studio_lib::capabilities::for_model(
+            xiic_image_studio_lib::provider::types::Protocol::OpenAiImages,
+            &model,
+        ),
         cancel: None,
     };
 

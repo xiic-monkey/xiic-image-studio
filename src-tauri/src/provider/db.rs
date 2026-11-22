@@ -37,8 +37,14 @@ pub fn list(conn: &Connection) -> AppResult<Vec<ProviderListItem>> {
     let mut out = Vec::new();
     for item in rows {
         let (p, has_key) = item?;
-        // 先算能力再进结构体字面量：字面量里 model: p.model 会把 p.model 移走
-        let capabilities = crate::capabilities::for_model(p.protocol, &p.model);
+        // 能力按「该供应商当前的默认模型」算：providers.model 只是历史遗留的单值字段，
+        // 多对多下真正生效的是 provider_models 里 is_default 的那条。
+        // 供应商还没挂任何模型时回退到协议默认能力，不让列表页直接报错。
+        let capabilities = match crate::model::db::resolve_for_request(conn, &p.id, None) {
+            Ok((_, proto, name, ov)) => crate::model::db::caps_with_override(proto, &name, &ov),
+            Err(_) => crate::capabilities::for_model(p.protocol, &p.model),
+        };
+        let model_ids = crate::model::db::model_ids_for_provider(conn, &p.id)?;
         out.push(ProviderListItem {
             id: p.id,
             name: p.name,
@@ -50,6 +56,7 @@ pub fn list(conn: &Connection) -> AppResult<Vec<ProviderListItem>> {
             created_at: p.created_at,
             updated_at: p.updated_at,
             capabilities,
+            model_ids,
         });
     }
     Ok(out)
@@ -149,6 +156,13 @@ pub fn save(conn: &Connection, input: &SaveInput) -> AppResult<()> {
                 new_key
             ],
         )?;
+    }
+
+    // 兼容旧表单：保存供应商时若填了模型，自动建成模型实体并挂到该供应商下。
+    // 这样即使不进模型库操作，新供应商也能立刻出图；后续可在模型库继续挂更多模型。
+    if !input.model.trim().is_empty() {
+        let model_id = crate::model::db::ensure_model(conn, input.protocol, input.model.trim())?;
+        crate::model::db::add_to_provider(conn, &input.id, &model_id)?;
     }
     Ok(())
 }

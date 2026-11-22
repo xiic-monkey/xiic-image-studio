@@ -53,6 +53,8 @@ export function useTaskFeed() {
               refCount: 0,
               seed: null,
               sessionId: null,
+              modelId: null,
+              modelName: null,
             }
           : prev[idx];
       // error 来自运行中的进度事件，并入 errors 数组并去重
@@ -98,6 +100,8 @@ export function useTaskFeed() {
         refCount: t.ref_count ?? 0,
         seed: t.seed ?? null,
         sessionId: t.session_id ?? null,
+        modelId: t.model_id ?? null,
+        modelName: t.model_name ?? null,
       }));
       // 只在任务集合真的变了才 setState：轮询每 3s 一次，
       // 无脑覆盖会让整个列表（含缩略图）每 3 秒重渲染一次。

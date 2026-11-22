@@ -18,13 +18,14 @@ pub struct PresetItem {
     pub quality: Option<String>,
     pub seed: Option<u64>,
     pub provider_id: Option<String>,
+    pub model_id: Option<String>,
     pub created_at: String,
 }
 
 /// 列出配方（核心逻辑；命令层只包一层 State）。
 pub fn list_presets(conn: &rusqlite::Connection) -> AppResult<Vec<PresetItem>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, prompt, size, quality, seed, provider_id, created_at
+        "SELECT id, name, prompt, size, quality, seed, provider_id, model_id, created_at
          FROM presets ORDER BY created_at DESC",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -36,7 +37,8 @@ pub fn list_presets(conn: &rusqlite::Connection) -> AppResult<Vec<PresetItem>> {
             quality: r.get(4)?,
             seed: r.get(5)?,
             provider_id: r.get(6)?,
-            created_at: r.get(7)?,
+            model_id: r.get(7)?,
+            created_at: r.get(8)?,
         })
     })?;
     Ok(rows.filter_map(|r| r.ok()).collect())
@@ -62,6 +64,8 @@ pub struct PresetSaveInput {
     pub seed: Option<u64>,
     #[serde(default)]
     pub provider_id: Option<String>,
+    #[serde(default)]
+    pub model_id: Option<String>,
 }
 
 /// 创建 / 更新一份配方。名字和提示词都不能为空——空配方的意义只是噪声。
@@ -85,21 +89,7 @@ pub fn save_preset(conn: &rusqlite::Connection, preset: PresetSaveInput) -> AppR
         .optional()?;
     if exists.is_some() {
         conn.execute(
-            "UPDATE presets SET name=?2, prompt=?3, size=?4, quality=?5, seed=?6, provider_id=?7 WHERE id=?1",
-            params![
-                id,
-                name,
-                prompt,
-                preset.size,
-                preset.quality,
-                preset.seed,
-                preset.provider_id
-            ],
-        )?;
-    } else {
-        conn.execute(
-            "INSERT INTO presets (id, name, prompt, size, quality, seed, provider_id, created_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            "UPDATE presets SET name=?2, prompt=?3, size=?4, quality=?5, seed=?6, provider_id=?7, model_id=?8 WHERE id=?1",
             params![
                 id,
                 name,
@@ -108,6 +98,22 @@ pub fn save_preset(conn: &rusqlite::Connection, preset: PresetSaveInput) -> AppR
                 preset.quality,
                 preset.seed,
                 preset.provider_id,
+                preset.model_id
+            ],
+        )?;
+    } else {
+        conn.execute(
+            "INSERT INTO presets (id, name, prompt, size, quality, seed, provider_id, model_id, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![
+                id,
+                name,
+                prompt,
+                preset.size,
+                preset.quality,
+                preset.seed,
+                preset.provider_id,
+                preset.model_id,
                 now
             ],
         )?;
@@ -148,6 +154,7 @@ mod tests {
             quality: Some("high".into()),
             seed: Some(42),
             provider_id: Some("p1".into()),
+            model_id: Some("m1".into()),
         }
     }
 
@@ -164,6 +171,7 @@ mod tests {
         assert_eq!(items[0].quality.as_deref(), Some("high"));
         assert_eq!(items[0].seed, Some(42));
         assert_eq!(items[0].provider_id.as_deref(), Some("p1"));
+        assert_eq!(items[0].model_id.as_deref(), Some("m1"));
     }
 
     #[test]
@@ -208,11 +216,13 @@ mod tests {
         p.quality = None;
         p.seed = None;
         p.provider_id = None;
+        p.model_id = None;
         save_preset(&conn, p).unwrap();
         let items = list_presets(&conn).unwrap();
         assert_eq!(items[0].size, None);
         assert_eq!(items[0].quality, None);
         assert_eq!(items[0].seed, None);
         assert_eq!(items[0].provider_id, None);
+        assert_eq!(items[0].model_id, None);
     }
 }

@@ -37,6 +37,13 @@ test("buildGenerateRequest 带 session_id 与全部参数", () => {
   assert.equal(req.quality, "high");
 });
 
+test("buildGenerateRequest 透传 model_id", () => {
+  const req = buildGenerateRequest(form({ modelId: "m-gpt" }), caps);
+  assert.equal(req.model_id, "m-gpt");
+  // 不指定时不带该字段，交给后端回退到供应商默认模型
+  assert.equal(buildGenerateRequest(form(), caps).model_id, undefined);
+});
+
 test("能力表关闭 seed 时不下发", () => {
   const req = buildGenerateRequest(form(), { ...caps, seed: false });
   assert.equal(req.seed, undefined);

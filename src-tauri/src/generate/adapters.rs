@@ -1,13 +1,12 @@
 use crate::capabilities;
 use crate::error::{AppError, AppResult};
 use crate::generate::types::{GenCtx, ImageOut};
-use crate::provider::types::Protocol;
 use base64::Engine;
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use super::client::{apply_headers, http_client, image_client, join_url};
+use super::client::{apply_headers, http_client, image_client, join_url, join_with_prefix};
 
 /// 测试里把轮询间隔压成 0，避免每个用例空等 3 秒。
 #[cfg(test)]
@@ -170,15 +169,15 @@ fn extract_urls(text: &str) -> Vec<String> {
 // ---------- OpenAI Images ----------
 
 /// 值在能力表里才允许下发；不在就当作没有这个参数。
-fn allowed(table: &[&str], value: &Option<String>) -> Option<String> {
+fn allowed(table: &[String], value: &Option<String>) -> Option<String> {
     value
         .as_ref()
-        .filter(|v| table.contains(&v.as_str()))
+        .filter(|v| table.iter().any(|t| t == v.as_str()))
         .cloned()
 }
 
 pub async fn openai_images(ctx: &GenCtx) -> AppResult<ImageOut> {
-    let caps = capabilities::for_model(Protocol::OpenAiImages, &ctx.model);
+    let caps = &ctx.caps;
     let client = image_client();
     let (path, is_multipart) = if ctx.refs.is_empty() {
         ("/v1/images/generations", false)
@@ -194,10 +193,10 @@ pub async fn openai_images(ctx: &GenCtx) -> AppResult<ImageOut> {
             .text("model", ctx.model.clone())
             .text("prompt", ctx.prompt.clone())
             .text("n", "1");
-        if let Some(size) = allowed(caps.sizes, &ctx.size) {
+        if let Some(size) = allowed(&caps.sizes, &ctx.size) {
             form = form.text("size", size);
         }
-        if let Some(q) = allowed(caps.quality, &ctx.quality) {
+        if let Some(q) = allowed(&caps.quality, &ctx.quality) {
             form = form.text("quality", q);
         }
         // seed 不下发：Images API 规范里没有这个字段
@@ -226,10 +225,10 @@ pub async fn openai_images(ctx: &GenCtx) -> AppResult<ImageOut> {
             "prompt": ctx.prompt,
             "n": 1,
         });
-        if let Some(size) = allowed(caps.sizes, &ctx.size) {
+        if let Some(size) = allowed(&caps.sizes, &ctx.size) {
             body["size"] = json!(size);
         }
-        if let Some(q) = allowed(caps.quality, &ctx.quality) {
+        if let Some(q) = allowed(&caps.quality, &ctx.quality) {
             body["quality"] = json!(q);
         }
         // seed 不下发：Images API 规范里没有这个字段
@@ -252,7 +251,7 @@ pub async fn openai_images(ctx: &GenCtx) -> AppResult<ImageOut> {
 // ---------- OpenAI Chat 生图 ----------
 
 pub async fn openai_chat_image(ctx: &GenCtx) -> AppResult<ImageOut> {
-    let caps = capabilities::for_model(Protocol::OpenAiChatImage, &ctx.model);
+    let caps = &ctx.caps;
     let client = image_client();
     let url = join_url(&ctx.base_url, "/v1/chat/completions");
 
@@ -321,7 +320,7 @@ pub async fn openai_chat_image(ctx: &GenCtx) -> AppResult<ImageOut> {
 // ---------- Gemini 原生 ----------
 
 pub async fn gemini_native(ctx: &GenCtx) -> AppResult<ImageOut> {
-    let caps = capabilities::for_model(Protocol::GeminiNative, &ctx.model);
+    let caps = &ctx.caps;
     if caps.endpoint == capabilities::ENDPOINT_PREDICT {
         return gemini_predict(ctx).await;
     }
@@ -343,7 +342,7 @@ pub async fn gemini_native(ctx: &GenCtx) -> AppResult<ImageOut> {
     });
     // seed 与画面比例都在 generationConfig 里，放顶层会被上游忽略
     let mut generation_config = serde_json::Map::new();
-    if let Some(size) = allowed(caps.sizes, &ctx.size) {
+    if let Some(size) = allowed(&caps.sizes, &ctx.size) {
         generation_config.insert("aspectRatio".into(), json!(size));
     }
     if caps.seed {
@@ -395,13 +394,13 @@ pub async fn gemini_native(ctx: &GenCtx) -> AppResult<ImageOut> {
 /// Imagen 走 :predict 端点（不是 :generateContent）：请求是 instances + parameters，
 /// 响应是 predictions[].bytesBase64Encoded。
 async fn gemini_predict(ctx: &GenCtx) -> AppResult<ImageOut> {
-    let caps = capabilities::for_model(Protocol::GeminiNative, &ctx.model);
+    let caps = &ctx.caps;
     let client = image_client();
     let model = ctx.model.trim_start_matches("models/");
     let url = join_url(&ctx.base_url, &format!("/v1beta/models/{model}:predict"));
 
     let mut parameters = serde_json::Map::new();
-    if let Some(size) = allowed(caps.sizes, &ctx.size) {
+    if let Some(size) = allowed(&caps.sizes, &ctx.size) {
         parameters.insert("aspectRatio".into(), json!(size));
     }
     parameters.insert("sampleImageSize".into(), json!("1K"));
@@ -435,6 +434,146 @@ async fn gemini_predict(ctx: &GenCtx) -> AppResult<ImageOut> {
         }
     }
     Err(AppError::Fetch("Imagen 响应中无 bytesBase64Encoded".into()))
+}
+
+// ---------- 火山方舟 Seedream ----------
+
+/// 火山方舟：POST {base}/api/v3/images/generations，OpenAI 兼容形态、同步返回。
+/// 参考图走 `image` 字段：单图传字符串，多图传数组（Seedream 最多 10 张）。
+pub async fn volcengine_ark(ctx: &GenCtx) -> AppResult<ImageOut> {
+    let caps = &ctx.caps;
+    let client = image_client();
+    let url = join_with_prefix(&ctx.base_url, "/api/v3", "/images/generations");
+
+    let mut body = json!({
+        "model": ctx.model,
+        "prompt": ctx.prompt,
+        "response_format": "url",
+    });
+    if let Some(size) = allowed(&caps.sizes, &ctx.size) {
+        body["size"] = json!(size);
+    }
+    if ctx.refs.len() == 1 {
+        let r = &ctx.refs[0];
+        body["image"] = json!(data_url(&r.mime, &r.data));
+    } else if ctx.refs.len() > 1 {
+        body["image"] = json!(ctx
+            .refs
+            .iter()
+            .map(|r| data_url(&r.mime, &r.data))
+            .collect::<Vec<_>>());
+    }
+
+    let rb = apply_headers(client.post(&url).bearer_auth(&ctx.key), &ctx.custom_headers);
+    let resp_body: Value = send_json(rb.json(&body)).await?;
+
+    if let Some(err) = resp_body.get("error") {
+        return Err(AppError::Upstream(format!(
+            "上游报错: {}",
+            err["message"].as_str().unwrap_or(&err.to_string())
+        )));
+    }
+    let first = resp_body["data"]
+        .as_array()
+        .and_then(|a| a.first())
+        .ok_or_else(|| AppError::Fetch("上游返回为空".into()))?;
+    image_from_data(first).await
+}
+
+// ---------- 阿里云百炼 DashScope 万相 ----------
+
+#[cfg(test)]
+const DASHSCOPE_POLL_INTERVAL: Duration = Duration::ZERO;
+#[cfg(not(test))]
+const DASHSCOPE_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const DASHSCOPE_POLL_TIMES: usize = 150;
+
+/// 百炼万相：异步提交任务 + 轮询结果。
+/// 提交 POST /api/v1/services/aigc/text2image/image-synthesis（带 X-DashScope-Async: enable），
+/// 轮询 GET /api/v1/tasks/{task_id}。尺寸用「宽*高」星号格式。
+pub async fn dashscope(ctx: &GenCtx) -> AppResult<ImageOut> {
+    let caps = &ctx.caps;
+    let client = http_client();
+    let url = join_with_prefix(
+        &ctx.base_url,
+        "/api/v1",
+        "/services/aigc/text2image/image-synthesis",
+    );
+
+    let mut parameters = serde_json::Map::new();
+    if let Some(size) = allowed(&caps.sizes, &ctx.size) {
+        parameters.insert("size".into(), json!(size));
+    }
+    parameters.insert("n".into(), json!(1));
+    let body = json!({
+        "model": ctx.model,
+        "input": {"prompt": ctx.prompt},
+        "parameters": serde_json::Value::Object(parameters),
+    });
+
+    let rb = apply_headers(
+        client
+            .post(&url)
+            .bearer_auth(&ctx.key)
+            .header("X-DashScope-Async", "enable"),
+        &ctx.custom_headers,
+    );
+    let resp: Value = send_json(rb.json(&body)).await?;
+
+    // 百炼的错误不是 OpenAI 的 error 结构，而是顶层 code/message
+    if let Some(code) = resp.get("code").and_then(|c| c.as_str()) {
+        return Err(AppError::Upstream(format!(
+            "上游报错({code}): {}",
+            resp.get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("未知错误")
+        )));
+    }
+    let task_id = resp["output"]["task_id"]
+        .as_str()
+        .ok_or_else(|| AppError::Fetch("百炼未返回 task_id".into()))?;
+
+    poll_dashscope_task(&client, &ctx.base_url, task_id, ctx).await
+}
+
+async fn poll_dashscope_task(
+    client: &reqwest::Client,
+    base_url: &str,
+    task_id: &str,
+    ctx: &GenCtx,
+) -> AppResult<ImageOut> {
+    let url = join_with_prefix(base_url, "/api/v1", &format!("/tasks/{task_id}"));
+    for _ in 0..DASHSCOPE_POLL_TIMES {
+        tokio::time::sleep(DASHSCOPE_POLL_INTERVAL).await;
+        if let Some(flag) = &ctx.cancel {
+            if flag.load(Ordering::Relaxed) {
+                return Err(AppError::General("已取消".into()));
+            }
+        }
+        let rb = apply_headers(client.get(&url).bearer_auth(&ctx.key), &ctx.custom_headers);
+        let status: Value = send_json(rb).await?;
+        let output = &status["output"];
+        match output["task_status"].as_str().unwrap_or("") {
+            "SUCCEEDED" => {
+                let img_url = output["results"]
+                    .as_array()
+                    .and_then(|a| a.first())
+                    .and_then(|r| r.get("url"))
+                    .and_then(|u| u.as_str())
+                    .ok_or_else(|| AppError::Fetch("百炼任务成功但无图片 URL".into()))?;
+                return download_url(img_url).await;
+            }
+            "FAILED" | "CANCELED" => {
+                let msg = output["message"]
+                    .as_str()
+                    .or_else(|| output["code"].as_str())
+                    .unwrap_or("未知原因");
+                return Err(AppError::General(format!("百炼任务失败: {msg}")));
+            }
+            _ => continue,
+        }
+    }
+    Err(AppError::General("百炼任务超时（5 分钟）".into()))
 }
 
 // ---------- Midjourney Proxy ----------
@@ -698,6 +837,11 @@ mod tests {
     }
 
     fn ctx(base: String, model: &str) -> GenCtx {
+        ctx_for(base, model, crate::provider::types::Protocol::OpenAiImages)
+    }
+
+    /// 能力现在随 ctx 一起带（提交时已解析），所以测试要指明协议。
+    fn ctx_for(base: String, model: &str, protocol: crate::provider::types::Protocol) -> GenCtx {
         GenCtx {
             base_url: base,
             key: "sk-test".into(),
@@ -709,8 +853,143 @@ mod tests {
             seed: Some(42),
             refs: vec![],
             mask: None,
+            caps: crate::capabilities::for_model(protocol, model),
             cancel: None,
         }
+    }
+
+    #[tokio::test]
+    async fn ark_posts_size_and_ref_to_v3_images_generations() {
+        let (base, cap) = capture_server(r#"{"data":[{"b64_json":"aGk="}]}"#);
+        let mut c = ctx_for(
+            base,
+            "doubao-seedream-5-5-261028",
+            crate::provider::types::Protocol::VolcengineArk,
+        );
+        c.size = Some("2K".into());
+        c.refs.push(RefImage {
+            name: "ref.png".into(),
+            mime: "image/png".into(),
+            data: "aGk=".into(),
+        });
+        let _ = super::volcengine_ark(&c).await;
+        let (head, body) = cap.lock().unwrap().clone();
+        assert!(
+            head.starts_with("POST /api/v3/images/generations"),
+            "实际请求行：{head}"
+        );
+        let v: Value = serde_json::from_str(&body).expect("请求体应是 JSON");
+        assert_eq!(v["size"], "2K", "方舟用分辨率档位");
+        assert!(
+            v["image"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("data:image/png;base64,"),
+            "参考图应作为 data URL 下发：{body}"
+        );
+        assert!(v.get("seed").is_none(), "方舟图像接口没有 seed：{body}");
+    }
+
+    #[tokio::test]
+    async fn ark_base_with_api_v3_prefix_is_not_duplicated() {
+        let (base, cap) = capture_server(r#"{"data":[{"b64_json":"aGk="}]}"#);
+        let c = ctx_for(
+            format!("{base}/api/v3"),
+            "doubao-seedream-5-5-261028",
+            crate::provider::types::Protocol::VolcengineArk,
+        );
+        let _ = super::volcengine_ark(&c).await;
+        let (head, _) = cap.lock().unwrap().clone();
+        assert!(
+            head.starts_with("POST /api/v3/images/generations"),
+            "base 已带 /api/v3 时不该重复：{head}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dashscope_submits_task_then_polls_until_succeeded() {
+        let (base, cap) = capture_server_n(vec![
+            (
+                200,
+                r#"{"output":{"task_id":"t-1","task_status":"PENDING"}}"#,
+            ),
+            (
+                200,
+                r#"{"output":{"task_status":"SUCCEEDED","results":[{"url":"data:image/png;base64,aGk="}]}}"#,
+            ),
+        ]);
+        let mut c = ctx_for(
+            base,
+            "wan2.6-t2i",
+            crate::provider::types::Protocol::DashScope,
+        );
+        c.size = Some("1024*1024".into());
+        let out = super::dashscope(&c).await.expect("百炼应出图");
+        assert_eq!(out.mime, "image/png");
+        let cap = cap.lock().unwrap();
+        assert_eq!(cap.len(), 2, "应先提交再轮询一次");
+        assert!(
+            cap[0]
+                .0
+                .starts_with("POST /api/v1/services/aigc/text2image/image-synthesis"),
+            "实际请求行：{}",
+            cap[0].0
+        );
+        assert!(
+            cap[0]
+                .0
+                .to_lowercase()
+                .contains("x-dashscope-async: enable"),
+            "异步模式头必须带上：{}",
+            cap[0].0
+        );
+        let v: Value = serde_json::from_str(&cap[0].1).expect("请求体应是 JSON");
+        assert_eq!(v["input"]["prompt"], "cat");
+        assert_eq!(v["parameters"]["size"], "1024*1024", "百炼尺寸用星号分隔");
+        assert!(
+            cap[1].0.starts_with("GET /api/v1/tasks/t-1"),
+            "实际请求行：{}",
+            cap[1].0
+        );
+    }
+
+    #[tokio::test]
+    async fn dashscope_reports_task_failure() {
+        let (base, _cap) = capture_server_n(vec![
+            (
+                200,
+                r#"{"output":{"task_id":"t-1","task_status":"PENDING"}}"#,
+            ),
+            (
+                200,
+                r#"{"output":{"task_status":"FAILED","message":"内容审核未通过"}}"#,
+            ),
+        ]);
+        let c = ctx_for(
+            base,
+            "wan2.6-t2i",
+            crate::provider::types::Protocol::DashScope,
+        );
+        let err = super::dashscope(&c).await.unwrap_err();
+        assert!(
+            err.to_string().contains("内容审核未通过"),
+            "实际错误：{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dashscope_surfaces_top_level_error_code() {
+        let (base, _cap) =
+            capture_server(r#"{"code":"InvalidApiKey","message":"No API-key provided."}"#);
+        let c = ctx_for(
+            base,
+            "wan2.6-t2i",
+            crate::provider::types::Protocol::DashScope,
+        );
+        let err = super::dashscope(&c).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("InvalidApiKey"), "实际错误：{msg}");
+        assert!(msg.contains("No API-key"), "实际错误：{msg}");
     }
 
     #[tokio::test]
@@ -733,7 +1012,12 @@ mod tests {
     #[tokio::test]
     async fn openai_chat_image_sends_seed_but_no_size_or_quality() {
         let (base, cap) = capture_server(r#"{"choices":[{"message":{"content":"x"}}]}"#);
-        let _ = super::openai_chat_image(&ctx(base, "gpt-4o-image")).await;
+        let _ = super::openai_chat_image(&ctx_for(
+            base,
+            "gpt-4o-image",
+            crate::provider::types::Protocol::OpenAiChatImage,
+        ))
+        .await;
         let (head, body) = cap.lock().unwrap().clone();
         assert!(
             head.starts_with("POST /v1/chat/completions"),
@@ -792,7 +1076,11 @@ mod tests {
         let (base, cap) = capture_server(
             r#"{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"aGk="}}]}}]}"#,
         );
-        let mut c = ctx(base, "gemini-2.5-flash-image");
+        let mut c = ctx_for(
+            base,
+            "gemini-2.5-flash-image",
+            crate::provider::types::Protocol::GeminiNative,
+        );
         c.size = Some("16:9".into());
         c.quality = None;
         let _ = super::gemini_native(&c).await;
@@ -812,7 +1100,11 @@ mod tests {
         let (base, cap) = capture_server(
             r#"{"predictions":[{"mimeType":"image/png","bytesBase64Encoded":"aGk="}]}"#,
         );
-        let mut c = ctx(base, "imagen-4.0-generate-001");
+        let mut c = ctx_for(
+            base,
+            "imagen-4.0-generate-001",
+            crate::provider::types::Protocol::GeminiNative,
+        );
         c.size = Some("1:1".into());
         c.quality = None;
         c.seed = None;
@@ -871,9 +1163,17 @@ mod tests {
                 r#"{"status":"SUCCESS","imageUrl":"data:image/png;base64,aGk="}"#,
             ),
         ]);
-        let out = super::midjourney_action(&ctx(base, "midjourney"), "old-mj", "U1")
-            .await
-            .unwrap();
+        let out = super::midjourney_action(
+            &ctx_for(
+                base,
+                "midjourney",
+                crate::provider::types::Protocol::MidjourneyProxy,
+            ),
+            "old-mj",
+            "U1",
+        )
+        .await
+        .unwrap();
         let reqs = cap.lock().unwrap().clone();
         assert_eq!(reqs.len(), 2, "提交 + 轮询各一次");
         assert!(
@@ -907,9 +1207,17 @@ mod tests {
     #[tokio::test]
     async fn mj_action_propagates_non_2xx_status() {
         let (base, _) = capture_server_n(vec![(500, r#"{"error":{"message":"boom"}}"#)]);
-        let err = super::midjourney_action(&ctx(base, "midjourney"), "old", "U1")
-            .await
-            .unwrap_err();
+        let err = super::midjourney_action(
+            &ctx_for(
+                base,
+                "midjourney",
+                crate::provider::types::Protocol::MidjourneyProxy,
+            ),
+            "old",
+            "U1",
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(err, crate::error::AppError::Status(500, _)),
             "实际：{err}"
@@ -922,9 +1230,17 @@ mod tests {
             (200, r#"{"code":1,"result":"new-mj"}"#),
             (200, r#"{"status":"FAILURE","failReason":"blocked"}"#),
         ]);
-        let err = super::midjourney_action(&ctx(base, "midjourney"), "old", "U1")
-            .await
-            .unwrap_err();
+        let err = super::midjourney_action(
+            &ctx_for(
+                base,
+                "midjourney",
+                crate::provider::types::Protocol::MidjourneyProxy,
+            ),
+            "old",
+            "U1",
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("blocked"), "实际：{err}");
     }
 
@@ -937,9 +1253,13 @@ mod tests {
                 r#"{"status":"SUCCESS","imageUrl":"data:image/png;base64,aGk="}"#,
             ),
         ]);
-        let out = super::midjourney_proxy(&ctx(base, "midjourney"))
-            .await
-            .unwrap();
+        let out = super::midjourney_proxy(&ctx_for(
+            base,
+            "midjourney",
+            crate::provider::types::Protocol::MidjourneyProxy,
+        ))
+        .await
+        .unwrap();
         let reqs = cap.lock().unwrap().clone();
         assert!(
             reqs[0].0.starts_with("POST /mj/submit/imagine"),

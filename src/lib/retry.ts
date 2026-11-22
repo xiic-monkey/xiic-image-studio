@@ -6,6 +6,7 @@ export interface RetryableTask {
   status: string;
   prompt: string;
   providerId: string;
+  modelId?: string | null;
   n: number;
   size: string | null;
   quality: string | null;
@@ -35,6 +36,7 @@ export function retryRequest(
   return buildGenerateRequest(
     {
       providerId: task.providerId,
+      modelId: task.modelId,
       prompt: task.prompt,
       n: task.n,
       size: task.size ?? "",

@@ -42,12 +42,13 @@
 ```
 ProviderConfig {
   name, base_url, api_key(钥匙串引用),
-  protocol: OpenAIImages | OpenAIChatImage | GeminiNative | MidjourneyProxy,
+  protocol: OpenAIImages | OpenAIChatImage | GeminiNative | MidjourneyProxy
+         | VolcengineArk | DashScope,
   model, extra_headers, custom_model_name   // 预设协议 + 手动覆盖模型名
 }
 ```
 
-四套协议适配器（对标 mj-studio，覆盖中转站全部主流形态）：
+六套协议适配器（对标 mj-studio，覆盖中转站全部主流形态）：
 
 | 协议 | 端点 | 典型模型 |
 |---|---|---|
@@ -55,6 +56,8 @@ ProviderConfig {
 | **OpenAIChatImage** | `POST {base}/v1/chat/completions`（回复中解析图片 URL/b64） | gpt-4o-image、Grok image、通义万相、nano-banana |
 | **GeminiNative** | `POST {base}/v1beta/models/{m}:generateContent` | gemini-2.5-flash-image |
 | **MidjourneyProxy** | `/mj/submit/imagine`、`/mj/task/{id}/fetch`（轮询） | midjourney 系（含垫图、U/V 操作） |
+| **VolcengineArk** | `POST {base}/api/v3/images/generations`（同步，OpenAI 兼容） | 豆包 Seedream 4/5、即梦；国内直连免梯子 |
+| **DashScope** | `POST {base}/api/v1/services/aigc/text2image/image-synthesis` + `GET /api/v1/tasks/{id}`（异步轮询） | 通义万相 wan2.x；国内直连 |
 
 辅助能力：
 - **模型发现**：拉 `/v1/models`，自动筛出疑似图像模型并猜协议（借鉴 image-studio）
@@ -100,6 +103,14 @@ ProviderConfig {
     画廊右键「存为配方」从一张成功的图直接存参数组合，工作台「配方」面板一键套用。
     与 `prompts` 表分开存：提示词库存文本，配方存的是「文本 + 能让它复现的参数」。
 
+### Phase 4（M6+，已实现）
+17. **供应商 × 模型多对多**：供应商=连接（url/key/headers），模型=一等实体（名+协议），
+    通过 `provider_models` 自由组合——同一模型可挂多家供应商，同一供应商可挂多协议的多个模型。
+    协议归模型（不是供应商），这正是"支持更多模型协议"的结构基础：加新协议只需加枚举+适配器+能力表一行。
+    生成请求带 `model_id`，`model::db::resolve` 统一解析（GUI/CLI 共用），capabilities 按所选模型算；
+    工作台拆成「供应商 / 模型」两级下拉，供应商页新增模型库与每家供应商的挂模型/设默认/解绑。
+    旧库自动迁移、配方也记 `model_id`。详见 §7。
+
 ### 参数说明（已对齐实现）
 - **seed（随机种子）**：由「协议 × 模型能力表」（`src-tauri/src/capabilities.rs`）决定是否下发。openai_chat_image 走请求体顶层（Chat Completions 标准参数）；gemini_native 走 `generationConfig.seed`；**openai_images 不下发**（Images API 规范里没有该字段，官方与转 OpenAI 的中转站都会 400）。上游不支持时静默忽略，不影响其他参数。
 - **n（数量）**：前端「数量」选择器 → `pipeline::execute` 按 `0..n` 并发 `buffer_unordered(FANOUT=4)`
@@ -110,6 +121,10 @@ ProviderConfig {
 - **能力表（协议 × 模型）**：`for_model(protocol, model)` 推导该组合实际接受的参数
   （尺寸取值 / 质量取值 / 是否支持 seed、参考图、蒙版 / 上游端点形态）。
   适配器据此发参，GUI 与 CLI 提交入口据此裁剪请求，前端据此收敛控件并把不支持项置灰。
+  能力来源三层，后者覆盖前者：**协议默认值 → 内置模型规则表（`MODEL_RULES`，按模型名前缀匹配，
+  加模型只加一行数据不改控制流）→ 用户对单个模型的 DB 级覆写（`models.capabilities_json`，
+  给中转站这类非标准尺寸用；非法 JSON 保存时报错，不静默丢弃）**。
+  能力随请求解析结果一路带进 `GenCtx.caps`，适配器不再自己算第二遍——两处各算一次迟早漂移。
   模型名匹配不到时走宽松兜底行（宁可上游报错，也不静默吞掉用户设的参数）。
   Imagen（`imagen-*`）走 `:predict` 端点分支。
 
@@ -121,12 +136,12 @@ ProviderConfig {
 └──────────────┬──────────────────────────────────┘
                │ Tauri IPC (invoke / event)
 ┌─ Rust 核心 ──┴──────────────────────────────────┐
-│ provider 模块   四套协议适配器 + 模型发现        │
+│ provider 模块   六套协议适配器 + 模型发现        │
 │ generate 模块                                    │
 │   ├─ pipeline.rs  ← 唯一编排层（prepare_task /   │
 │   │                 execute / spawn_task /       │
 │   │                 run_task_headless）           │
-│   ├─ adapters.rs  四协议 + MJ action 出图        │
+│   ├─ adapters.rs  六协议 + MJ action 出图        │
 │   └─ mod.rs       run_one_core（唯一出图落库叶子）│
 │ storage 模块    rusqlite (任务/会话/图片元数据)  │
 │ media 模块      image 缩略图 ｜ ffmpeg sidecar  │
@@ -151,15 +166,30 @@ ProviderConfig {
 ## 7. 数据模型（SQLite）
 
 ```sql
-providers   (id, name, base_url, protocol, model, custom_headers, created_at)  -- key 只存钥匙串引用
-sessions    (id, name, provider_id, draft_json, created_at)
-tasks       (id, session_id, provider_id, protocol, request_json, status,
-             error, concurrency, total, created_at, finished_at)  -- session_id REFERENCES sessions(id) ON DELETE SET NULL
-images      (id, task_id, path, thumb_path, prompt, model, params_json,
-             favorite, width, height, size, created_at)    -- task_id REFERENCES tasks(id) ON DELETE SET NULL（可空）
-prompts     (id, title, content, tags)
-presets     (id, name, prompt, size, quality, seed, provider_id, created_at)  -- 生成配方
+providers       (id, name, base_url, protocol, model, custom_headers, created_at)  -- 连接；key 只存库内（AES-GCM）
+-- protocol/model 两列保留作迁移来源与回退兜底，代码不再用它们派生生成参数
+models          (id, protocol, model_name, label, created_at)  -- 一等模型；UNIQUE(protocol, model_name)
+provider_models (provider_id, model_id, is_default, created_at) -- 多对多关联；PK(provider_id, model_id)
+                -- provider_id REFERENCES providers(id) ON DELETE CASCADE
+                -- model_id REFERENCES models(id) ON DELETE CASCADE
+sessions        (id, name, provider_id, draft_json, created_at)
+tasks           (id, session_id, provider_id, protocol, request_json, status,
+                 error, concurrency, total, created_at, finished_at)  -- session_id REFERENCES sessions(id) ON DELETE SET NULL
+images          (id, task_id, path, thumb_path, prompt, model, params_json,
+                 favorite, width, height, size, created_at)    -- task_id REFERENCES tasks(id) ON DELETE SET NULL（可空）
+prompts         (id, title, content, tags)
+presets         (id, name, prompt, size, quality, seed, provider_id, model_id, created_at)  -- 生成配方
+meta            (key, value)  -- 迁移标记（provider_models_migrated）
 ```
+
+- **供应商 × 模型 多对多**：供应商只是连接（url/key/headers），模型是一等实体且**协议归模型**；
+  同一 `(protocol, model_name)` 全局唯一、可被多家供应商复用，同一供应商也能挂不同协议的模型。
+  生成请求带 `model_id`，后端 `model::db::resolve` 解析出 `(protocol, model_name)` 与能力，
+  不再从 `provider.protocol/model` 隐式派生。能力仍由 `capabilities::for_model` 动态算，不入库。
+- 旧库迁移 `storage::migrate_provider_models`：把每个旧 provider 的 `(protocol, model)` 拆成
+  models + provider_models，按 UNIQUE 去重、空模型建兜底行；用 `meta` 表的一次性标记做幂等，
+  跑完即使用户解绑了全部关联也不会在下次启动被重新挂回。
+- `presets.model_id`：配方除供应商外也记模型，套用时能恢复模型选择。
 
 - 外键是真声明的（不是只开 `PRAGMA foreign_keys`）：`tasks.session_id` → `sessions(id)`、
   `images.task_id` → `tasks(id)`，都是 `ON DELETE SET NULL`。
@@ -170,8 +200,9 @@ presets     (id, name, prompt, size, quality, seed, provider_id, created_at)  --
   删会话后该列被 `ON DELETE SET NULL` 清空，任务仍在。`task_list` **不按 session_id 过滤**——
   否则 CLI 任务与历史任务会从工作台消失。`TaskItem` 同时回传 `session_id` / `seed`，
   一键重试据此复现原会话归属与随机种子。
-- `request_json` 由 `build_request_json` 唯一构造，只记 6 个键：`prompt/n/size/quality/seed/ref_count`；
-  MJ U/V 用 `build_mj_action_request_json`（`action` + `mj_task_id`，无 prompt → 前端不给重试入口）。
+- `request_json` 由 `build_request_json` 唯一构造，记 7 个键：`prompt/n/size/quality/seed/ref_count/model_id`；
+  `model_id` 供一键重试复原到具体模型。MJ U/V 用 `build_mj_action_request_json`
+  （`action` + `mj_task_id`，无 prompt → 前端不给重试入口）。
   `task_list` 的解析抽成 `parse_request_json`，对旧数据与坏 JSON 做兼容。
 - 旧库没有 REFERENCES，迁移由 `storage::migrate_foreign_keys` 重建表完成
   （SQLite 不能 ALTER TABLE 加约束）：重建在一个事务里，孤儿引用置 NULL，数据零丢失。
@@ -186,21 +217,24 @@ presets     (id, name, prompt, size, quality, seed, provider_id, created_at)  --
 xiic-image-studio/
 ├── src-tauri/src/
 │   ├── lib.rs / main.rs           # tauri 入口、命令注册、窗口上屏/跨 Space
-│   ├── provider/{client,commands,db,mod,types}.rs   # 四协议 + 模型发现 + 测试
+│   ├── provider/{client,commands,db,mod,types}.rs   # 六协议连接 + 模型发现 + 测试
+│   ├── model/{commands,db,mod,types}.rs            # 模型实体 + 供应商×模型关联（多对多）
 │   ├── generate/{adapters,client,commands,mod,types,pipeline}.rs
-│   │       # pipeline = 唯一编排层；mod = 底层原语；adapters = 四协议 + MJ action
+│   │       # pipeline = 唯一编排层；mod = 底层原语；adapters = 六协议 + MJ action
 │   ├── cli.rs                     # generate / export / providers 无头模式
 │   ├── media.rs                   # ffmpeg sidecar + 缩略图
 │   ├── crypto.rs                  # AES-256-GCM 本地密钥
 │   ├── capabilities.rs            # 协议 × 模型能力表（尺寸/质量/seed/参考图/蒙版/端点），唯一事实源
+│   │                              # 协议默认 + MODEL_RULES 规则表 + 用户覆写三层
 │   ├── {storage,sessions,gallery,prompts,presets,error}.rs
+├── src/lib/protocols.ts           # 协议常量 + 供应商模板（后端加协议要同步这里）
 ├── src/
 │   ├── views/{Workbench,Gallery,Providers,Prompts,Tools}View.tsx
 │   ├── views/workbench/{SessionTabs,SessionContextMenu,RefImages,ParamRow,
 │   │       SubmitBar,TemplatePanel,PresetPanel,MaskEditorLayer,styles}.tsx/.ts  # 工作台展示层
 │   ├── hooks/{useTaskFeed,useSessions,useDraft,useSubmissions}.ts  # 轮询/会话/草稿/提交副作用
 │   ├── components/{TaskPanel,MaskEditor,ProviderForm,Select,TrafficLights}.tsx
-│   ├── stores/{prefill,providers}.ts
+│   ├── stores/{prefill,providers,models}.ts
 │   ├── lib/{submission,request,draft,retry,task-signature,mask-geometry,
 │   │       capabilities,batch-parse,ref-image}.ts + 同名 .test.ts
 │   │       # 纯函数：提交语义 / 请求组装 / 草稿指纹 / 重试 / 列表指纹 / 蒙版几何 /
@@ -229,8 +263,12 @@ xiic-image-studio/
 - 入口最简：直连 `src-tauri/target/release/xiic-image-studio`（skill 的 `scripts/xiic.js`
   按 `XIIC_IMAGE_STUDIO_BIN` → PATH → release 目录 → `/Applications/...app` 顺序找它）。
   `cargo clean` 后需 `cargo build --release` 恢复。
+- 模型选择：`--model <模型名|id>` 指定用该供应商下的哪个模型，不传用默认模型。
+  GUI 与 CLI 都走 `model::db::resolve` 解析出 `(protocol, model_name)` 与能力，
+  协议/模型不再从供应商旧列派生；`request_json.model_id` 供重试复原。
+  指定未关联的模型直接报错，绝不静默改用别的模型。
 - 能力必须是 studio 自己的：`cli.rs::generate` 与 GUI 的 `generate_submit` 走同一套
-  `capabilities::sanitize` → `build_request_json` → `pipeline::prepare_task`（唯一建任务行）；
+  `model::db::resolve` → `capabilities::sanitize` → `build_request_json` → `pipeline::prepare_task`（唯一建任务行）；
   执行侧 GUI 走 `spawn_task` / `execute(RunMode::Gui)`，无头走 `run_task_headless` /
   `execute(RunMode::Headless)`，两边最终都落到 `mod.rs::run_one_core`（同库、同 adapters、
   同落库规则、同 images 目录）。**不在外部 crate 复制 DB schema / 解密 / adapters**，
@@ -304,9 +342,16 @@ xiic-image-studio/
 
 ## 12. 待办 / 已知限制
 
+- **供应商 × 模型多对多**：已做。模型是一等实体、协议归模型，关联表自由组合；
+  生成请求带 `model_id`，GUI/CLI 共用 `model::db::resolve`；旧库自动迁移。
+  已在此基础上新增两种协议（VolcengineArk / DashScope），即"加协议 = 加枚举 + 适配器 + 能力表一行"。
+- **供应商模板**：前端内置 6 个常用供应商模板（OpenAI / OpenRouter / SiliconFlow / Gemini /
+  火山方舟 / 阿里百炼），一键填好名称、baseUrl、协议与常用模型，Key 仍需自填。
+- **模型级能力覆写**：模型库每行可展开「能力」，用 JSON 覆写该模型的尺寸/质量/seed 等取值，
+  给非标准中转站用。覆写优先于内置规则表；非法 JSON 保存时直接报错。
 - **ffmpeg webp**：macOS 上 brew 版 ffmpeg 默认不带 libwebp，选 webp 会报错；打包用的 sidecar 自带 webp。
 - **seed 兼容性**：是否下发由能力表决定（openai_chat_image / gemini_native 下发，openai_images 不下发）；
-  部分中转站无视该字段属正常。
+  部分中转站无视该字段属正常。新增的 volcengine_ark / dashscope 同样不下发 seed。
 - **批量任务导出**：已做。GUI「导出 JSONL」与 CLI `export` 共用
   `gallery::query_images` / `export_rows` / `write_jsonl`，导出字段与「导入批量」对齐，
   导出的文件能原样导回再跑一遍。

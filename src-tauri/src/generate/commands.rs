@@ -38,10 +38,22 @@ pub fn submit_task(app: &AppHandle, mut request: GenerateRequest) -> AppResult<S
             .ok_or_else(|| AppError::General("该供应商尚未保存 API Key".into()))?
     };
 
-    let caps = crate::capabilities::for_model(provider.protocol, &provider.model);
-    crate::capabilities::sanitize(&caps, &mut request);
+    // 解析供应商 × 模型：协议与模型名来自关联，不再取 provider 的旧列。
+    // GUI 与 CLI 共用 model::db::resolve，行为一致。
+    let resolved = {
+        let conn = db.conn();
+        crate::model::db::resolve(&conn, &request.provider_id, request.model_id.as_deref())?
+    };
+    crate::capabilities::sanitize(&resolved.capabilities, &mut request);
 
-    let ctx = pipeline::build_ctx(&provider, key, &request, &prompt);
+    let ctx = pipeline::build_ctx(
+        &provider,
+        key,
+        &request,
+        &prompt,
+        &resolved.model_name,
+        resolved.capabilities.clone(),
+    );
     let request_json = build_request_json(&request, n);
     let task = {
         let conn = db.conn();
@@ -50,10 +62,10 @@ pub fn submit_task(app: &AppHandle, mut request: GenerateRequest) -> AppResult<S
             provider: &provider,
             n,
             request_json: &request_json,
-            producer: ImageProducer::Protocol(provider.protocol),
+            producer: ImageProducer::Protocol(resolved.protocol),
             ctx,
             prompt,
-            model: provider.model.clone(),
+            model: resolved.model_name.clone(),
         };
         pipeline::prepare_task(&conn, spec)?
     };
@@ -79,6 +91,7 @@ struct ParsedTaskRequest {
     n: u32,
     seed: Option<u64>,
     ref_count: u64,
+    model_id: Option<String>,
 }
 
 fn parse_request_json(s: &str) -> ParsedTaskRequest {
@@ -91,6 +104,7 @@ fn parse_request_json(s: &str) -> ParsedTaskRequest {
         n: req.get("n").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
         seed: req.get("seed").and_then(|v| v.as_u64()),
         ref_count: req.get("ref_count").and_then(|v| v.as_u64()).unwrap_or(0),
+        model_id: str_of("model_id"),
     }
 }
 
@@ -128,10 +142,32 @@ pub fn task_list(db: State<Db>, limit: Option<u32>) -> AppResult<Vec<TaskItem>> 
                 ref_count: parsed.ref_count,
                 images: Vec::new(),
                 session_id: r.get::<_, Option<String>>(9)?,
+                model_id: parsed.model_id,
+                model_name: None,
             })
         })?
         .filter_map(|r| r.ok())
         .collect();
+
+    // 一次性回填模型名（按 request_json 里的 model_id 查），避免每条任务一次查询。
+    let model_ids: Vec<String> = items.iter().filter_map(|t| t.model_id.clone()).collect();
+    if !model_ids.is_empty() {
+        let marks = model_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!("SELECT id, model_name FROM models WHERE id IN ({})", marks);
+        let mut mstmt = conn.prepare(&sql)?;
+        let rows = mstmt.query_map(rusqlite::params_from_iter(model_ids.iter()), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut names: HashMap<String, String> = HashMap::new();
+        for (id, name) in rows.filter_map(|r| r.ok()) {
+            names.insert(id, name);
+        }
+        for t in &mut items {
+            if let Some(id) = &t.model_id {
+                t.model_name = names.get(id).cloned();
+            }
+        }
+    }
 
     // 一次性取出这批任务的所有图片并按 task_id 分组回填（避免 N+1 次查询）。
     // 没有这一步，刷新窗口后历史任务永远没有缩略图——实时进度只推"新生成"的图。
@@ -222,9 +258,17 @@ pub async fn mj_action(
             .ok_or_else(|| AppError::General("供应商缺少 API Key".into()))?
     };
 
+    // MJ U/V 不依赖模型发参，但编排层 ctx/task 仍要一个模型名；取供应商默认模型即可
+    let model_name = {
+        let conn = db.conn();
+        crate::model::db::resolve(&conn, &provider_id, None)
+            .map(|m| m.model_name)
+            .unwrap_or_else(|_| provider.model.clone())
+    };
     let prompt = format!("[{command}]");
     let req = GenerateRequest {
         provider_id: provider_id.clone(),
+        model_id: None,
         prompt: prompt.clone(),
         n: 1,
         size: None,
@@ -234,7 +278,17 @@ pub async fn mj_action(
         mask: None,
         session_id: parent_session_id.clone(),
     };
-    let ctx = pipeline::build_ctx(&provider, key, &req, &prompt);
+    let ctx = pipeline::build_ctx(
+        &provider,
+        key,
+        &req,
+        &prompt,
+        &model_name,
+        crate::capabilities::for_model(
+            crate::provider::types::Protocol::MidjourneyProxy,
+            &model_name,
+        ),
+    );
     let request_json = build_mj_action_request_json(&command, &mj_task_id);
     let producer = ImageProducer::MjAction {
         mj_task_id,
@@ -250,7 +304,7 @@ pub async fn mj_action(
             producer,
             ctx,
             prompt,
-            model: provider.model.clone(),
+            model: model_name.clone(),
         };
         pipeline::prepare_task(&conn, spec)?
     };
@@ -285,6 +339,12 @@ mod tests {
         assert_eq!(p.quality.as_deref(), Some("high"));
         assert_eq!(p.seed, Some(42));
         assert_eq!(p.ref_count, 0);
+    }
+
+    #[test]
+    fn parse_request_json_reads_model_id() {
+        let p = parse_request_json(r#"{"prompt":"cat","n":1,"model_id":"m-42"}"#);
+        assert_eq!(p.model_id.as_deref(), Some("m-42"), "重试要靠它复原模型");
     }
 
     #[test]

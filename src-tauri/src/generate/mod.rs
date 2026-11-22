@@ -74,6 +74,8 @@ fn dispatch_producer<'a>(
         ImageProducer::Protocol(Protocol::MidjourneyProxy) => {
             Box::pin(adapters::midjourney_proxy(ctx))
         }
+        ImageProducer::Protocol(Protocol::VolcengineArk) => Box::pin(adapters::volcengine_ark(ctx)),
+        ImageProducer::Protocol(Protocol::DashScope) => Box::pin(adapters::dashscope(ctx)),
         ImageProducer::MjAction {
             mj_task_id,
             command,
@@ -444,9 +446,161 @@ pub fn read_file_b64(images_root: &Path, rel_or_abs: &str) -> AppResult<String> 
 
 #[cfg(test)]
 mod tests {
-    use super::{create_task, finish_task_row, insert_image, reclaim_orphan_tasks, NewImage};
+    use super::{
+        create_task, dispatch_producer, finish_task_row, insert_image, reclaim_orphan_tasks,
+        NewImage,
+    };
     use crate::error::AppError;
     use rusqlite::{params, Connection};
+
+    /// 端到端：建供应商（带 Key）→ 自动建模型并关联 → 解析模型 → 按能力裁剪请求 →
+    /// 构造上下文 → 按协议分发 → 真拿到一张图。
+    /// 适配器单测只证明请求格式对，这条链路才证明「新协议真的跑得通」：
+    /// 路由、能力传递、Key 加解密、模型多对多关联都在这条线上。
+    #[tokio::test]
+    async fn ark_provider_to_image_runs_end_to_end() {
+        use crate::capabilities;
+        use crate::generate::pipeline;
+        use crate::generate::types::{GenerateRequest, ImageProducer};
+        use crate::model::db as model_db;
+        use crate::provider::db as provider_db;
+        use crate::provider::types::Protocol;
+        use std::collections::BTreeMap;
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+
+        // 只应答一次的上游，顺带把请求行与请求体记下来
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let captured: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
+        let sink = captured.clone();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf: Vec<u8> = Vec::new();
+            let mut tmp = [0u8; 4096];
+            let mut header_end = 0usize;
+            while header_end == 0 {
+                let n = stream.read(&mut tmp).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    header_end = pos + 4;
+                }
+            }
+            let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
+            let content_length = head
+                .lines()
+                .find_map(|l| {
+                    l.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                })
+                .unwrap_or(0);
+            while buf.len() < header_end + content_length {
+                let n = stream.read(&mut tmp).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+            }
+            let end = (header_end + content_length).min(buf.len());
+            sink.lock().unwrap().replace((
+                head,
+                String::from_utf8_lossy(&buf[header_end..end]).to_string(),
+            ));
+            let body = r#"{"data":[{"b64_json":"aGk="}]}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.flush();
+        });
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::storage::init(&conn).unwrap();
+
+        let input = provider_db::SaveInput {
+            id: "p-ark".into(),
+            name: "火山方舟".into(),
+            base_url: format!("http://{addr}"),
+            protocol: Protocol::VolcengineArk,
+            model: "doubao-seedream-5-5-261028".into(),
+            custom_headers: BTreeMap::new(),
+            api_key: Some("sk-test".into()),
+        };
+        provider_db::save(&conn, &input).unwrap();
+
+        // Key 必须加密落库，不能留明文
+        let raw_key: String = conn
+            .query_row(
+                "SELECT api_key FROM providers WHERE id = ?1",
+                ["p-ark"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            raw_key.starts_with("enc:v1:"),
+            "key 应加密落库，实际：{raw_key}"
+        );
+
+        // 保存时填了模型 → 自动建成模型实体并挂到这家供应商下
+        let resolved = model_db::resolve(&conn, "p-ark", None).unwrap();
+        assert_eq!(resolved.protocol, Protocol::VolcengineArk);
+        assert_eq!(resolved.model_name, "doubao-seedream-5-5-261028");
+        assert!(resolved.capabilities.allows_size("2K"));
+        assert!(!resolved.capabilities.seed, "方舟没有 seed");
+
+        let mut req = GenerateRequest {
+            provider_id: "p-ark".into(),
+            model_id: None,
+            prompt: "一只猫".into(),
+            n: 1,
+            size: Some("2K".into()),
+            quality: Some("high".into()),
+            seed: Some(7),
+            refs: vec![],
+            mask: None,
+            session_id: None,
+        };
+        capabilities::sanitize(&resolved.capabilities, &mut req);
+        assert!(req.quality.is_none(), "方舟没有 quality，应被裁掉");
+        assert!(req.seed.is_none(), "方舟没有 seed，应被裁掉");
+        assert_eq!(req.size.as_deref(), Some("2K"));
+
+        let provider = provider_db::get(&conn, "p-ark").unwrap().unwrap();
+        let key = provider_db::get_key(&conn, "p-ark").unwrap().unwrap();
+        assert_eq!(key, "sk-test", "解密出的 key 应与存入一致");
+
+        let ctx = pipeline::build_ctx(
+            &provider,
+            key,
+            &req,
+            "一只猫",
+            &resolved.model_name,
+            resolved.capabilities.clone(),
+        );
+        let out = dispatch_producer(&ctx, &ImageProducer::Protocol(resolved.protocol))
+            .await
+            .expect("方舟协议应能出图");
+        assert!(!out.bytes.is_empty());
+
+        let (head, body) = captured.lock().unwrap().clone().unwrap();
+        assert!(
+            head.starts_with("POST /api/v3/images/generations"),
+            "实际请求行：{head}"
+        );
+        let v: serde_json::Value = serde_json::from_str(&body).expect("请求体应是 JSON");
+        assert_eq!(v["size"], "2K");
+        assert!(v.get("quality").is_none(), "被裁掉的参数不该出现在请求里");
+        assert!(v.get("seed").is_none(), "被裁掉的参数不该出现在请求里");
+    }
 
     fn sample<'a>(id: &'a str, task_id: &'a str) -> NewImage<'a> {
         NewImage {

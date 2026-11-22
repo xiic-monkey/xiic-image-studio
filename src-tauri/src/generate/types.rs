@@ -17,6 +17,9 @@ pub struct RefImage {
 #[derive(Debug, Clone, Deserialize)]
 pub struct GenerateRequest {
     pub provider_id: String,
+    /// 显式指定使用供应商下的哪个模型（id）。为空时回退到该供应商的默认模型。
+    #[serde(default)]
+    pub model_id: Option<String>,
     pub prompt: String,
     #[serde(default = "default_n")]
     pub n: u32,
@@ -62,6 +65,7 @@ pub fn build_request_json(req: &GenerateRequest, n: u32) -> String {
         "quality": req.quality,
         "seed": req.seed,
         "ref_count": req.refs.len(),
+        "model_id": req.model_id,
     })
     .to_string()
 }
@@ -139,6 +143,10 @@ pub struct TaskItem {
     pub images: Vec<ImageMeta>,
     /// 会话归属；CLI 任务与旧数据为 NULL
     pub session_id: Option<String>,
+    /// 该任务使用的模型 id（重试时据此复原模型）。旧数据为 None。
+    pub model_id: Option<String>,
+    /// 该任务使用的上游模型名（展示用）。旧数据为 None。
+    pub model_name: Option<String>,
 }
 
 /// 适配器输出：原始字节 + mime + 协议特有元数据（如 MJ task id）
@@ -172,6 +180,9 @@ pub struct GenCtx {
     pub seed: Option<u64>,
     pub refs: Vec<RefImage>,
     pub mask: Option<RefImage>,
+    /// 提交时已解析好的能力。适配器直接用这份，不再自己推导——
+    /// 两处各算一次迟早漂移（内置规则 + 用户覆写都要算数）。
+    pub caps: crate::capabilities::Capabilities,
     /// 取消信号（MJ 长轮询期间检查）
     pub cancel: Option<Arc<AtomicBool>>,
 }
@@ -204,6 +215,7 @@ mod tests {
     fn req() -> GenerateRequest {
         GenerateRequest {
             provider_id: "p1".into(),
+            model_id: Some("m-1".into()),
             prompt: "  cat  ".into(),
             n: 3,
             size: Some("1024x1024".into()),
@@ -228,6 +240,7 @@ mod tests {
         assert_eq!(v["quality"], "high");
         assert_eq!(v["seed"], 42);
         assert_eq!(v["ref_count"], 1);
+        assert_eq!(v["model_id"], "m-1");
         assert!(
             v.get("session_id").is_none(),
             "会话归属走表列，不进 request_json"
@@ -268,6 +281,7 @@ mod tests {
                 data: "d".into(),
             }],
             mask: None,
+            caps: crate::capabilities::for_model(Protocol::OpenAiImages, "m"),
             cancel: Some(Arc::new(AtomicBool::new(false))),
         };
         let cloned = ctx.clone();

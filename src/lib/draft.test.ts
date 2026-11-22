@@ -9,6 +9,7 @@ test("draftFromForm 不含 refs / mask / session_id", () => {
   assert.deepEqual(keys.sort(), [
     "batchMode",
     "count",
+    "modelId",
     "prompt",
     "providerId",
     "quality",

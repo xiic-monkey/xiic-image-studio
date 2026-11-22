@@ -1,4 +1,13 @@
-export type Protocol = "openai_images" | "openai_chat_image" | "gemini_native" | "midjourney_proxy";
+import type { Protocol } from "./lib/protocols.ts";
+
+export type { Protocol };
+export {
+  PROTOCOL_LABELS,
+  PROTOCOL_PRESET_MODELS,
+  PROTOCOL_PRESET_URL,
+  PROVIDER_TEMPLATES,
+} from "./lib/protocols.ts";
+export type { ProviderTemplate } from "./lib/protocols.ts";
 
 /** 某个「协议 + 模型」实际接受的参数集合，由后端能力表下发。 */
 export interface Capabilities {
@@ -9,9 +18,9 @@ export interface Capabilities {
   seed: boolean;
   refs: boolean;
   mask: boolean;
-  /** 上游端点形态：images | chat | generate_content | predict | mj */
+  /** 上游端点形态：images | chat | generate_content | predict | mj | ark | dashscope */
   endpoint: string;
-  /** 尺寸控件标签：尺寸 | 画面比例 */
+  /** 尺寸控件标签：尺寸 | 画面比例 | 分辨率 */
   sizeLabel: string;
 }
 
@@ -26,6 +35,32 @@ export interface ProviderListItem {
   created_at: string;
   updated_at: string;
   capabilities: Capabilities;
+  /** 挂在这个供应商下的模型 id（多对多关联） */
+  model_ids: string[];
+}
+
+/** 一等模型实体：协议归模型，可被多家供应商复用。 */
+export interface ModelItem {
+  id: string;
+  protocol: Protocol;
+  model_name: string;
+  label: string;
+  capabilities: Capabilities;
+  /** 挂了这个模型的供应商数量 */
+  provider_count: number;
+  /** 是否已挂在当前查看的供应商下 */
+  linked: boolean;
+  /** 用户对该模型能力的覆写 JSON（空 = 用内置推导值） */
+  capabilities_override: string;
+}
+
+export interface ModelDraft {
+  id?: string | null;
+  protocol: Protocol;
+  model_name: string;
+  label: string;
+  /** 能力覆写 JSON（可选）。非法 JSON 会在保存时报错，不会静默丢弃。 */
+  capabilities_override?: string;
 }
 
 export interface ProviderDraft {
@@ -59,27 +94,6 @@ export interface DiscoveredModels {
   message: string;
 }
 
-export const PROTOCOL_LABELS: Record<Protocol, string> = {
-  openai_images: "OpenAI Images（gpt-image / DALL-E / Flux）",
-  openai_chat_image: "Chat 生图（gpt-4o-image / Grok / 万相）",
-  gemini_native: "Gemini 原生（nano-banana）",
-  midjourney_proxy: "Midjourney Proxy（MJ-Proxy）",
-};
-
-export const PROTOCOL_PRESET_URL: Record<Protocol, string> = {
-  openai_images: "https://api.openai.com",
-  openai_chat_image: "https://api.openai.com",
-  gemini_native: "https://generativelanguage.googleapis.com",
-  midjourney_proxy: "https://mj.example.com",
-};
-
-export const PROTOCOL_PRESET_MODELS: Record<Protocol, string[]> = {
-  openai_images: ["gpt-image-2.5", "gpt-image-2", "gpt-image-1", "dall-e-3", "flux-1.1-pro", "seedream-4.0"],
-  openai_chat_image: ["gpt-4o-image", "grok-2-image", "wanxiang-v2"],
-  gemini_native: ["gemini-2.5-flash-image", "imagen-4.0-generate-001"],
-  midjourney_proxy: ["midjourney", "midjourney-fast", "midjourney-turbo"],
-};
-
 // ---------- 生成 ----------
 
 export interface RefImage {
@@ -90,6 +104,8 @@ export interface RefImage {
 
 export interface GenerateRequest {
   provider_id: string;
+  /** 显式指定供应商下的哪个模型（id）；为空回退到默认模型 */
+  model_id?: string | null;
   prompt: string;
   n: number;
   size?: string;
@@ -136,6 +152,10 @@ export interface TaskItem {
   ref_count?: number;
   /** 会话归属；CLI 任务与旧数据为 null */
   session_id?: string | null;
+  /** 该任务使用的模型 id（重试时据此复原模型） */
+  model_id?: string | null;
+  /** 该任务使用的上游模型名（展示用） */
+  model_name?: string | null;
   /** 该任务已生成的图片（刷新后靠它回填缩略图） */
   images?: ImageMeta[];
 }
@@ -160,6 +180,10 @@ export interface TaskView {
   seed: number | null;
   /** 会话归属；CLI 任务与旧数据为 null，重试时回落到当前会话 */
   sessionId: string | null;
+  /** 该任务使用的模型 id（重试时据此复原模型） */
+  modelId: string | null;
+  /** 该任务使用的上游模型名（展示用） */
+  modelName: string | null;
 }
 
 export type TaskUpsert = Partial<TaskView> & { id: string; error?: string };
@@ -197,6 +221,8 @@ export interface PresetItem {
   quality?: string | null;
   seed?: number | null;
   provider_id?: string | null;
+  /** 配方保存时用的模型 id（应用时恢复模型选择） */
+  model_id?: string | null;
   created_at: string;
 }
 
@@ -205,6 +231,7 @@ export interface SessionItem {
   name: string;
   draft: {
     providerId?: string;
+    modelId?: string;
     prompt?: string;
     size?: string;
     quality?: string;

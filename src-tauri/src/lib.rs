@@ -5,6 +5,7 @@ pub mod cli;
 pub mod crypto;
 pub mod error;
 pub mod generate;
+pub mod model;
 pub mod provider;
 
 pub mod gallery;
@@ -23,6 +24,10 @@ use generate::QueueState;
 use media::{
     tools_convert, tools_file_b64, tools_gif, tools_set_ffmpeg_path, tools_status,
     tools_video_frames,
+};
+use model::commands::{
+    model_add, model_delete, model_list, model_list_for_provider, provider_model_add,
+    provider_model_remove, provider_model_set_default,
 };
 use presets::{preset_delete, preset_list, preset_save};
 use prompts::{prompt_delete, prompt_list, prompt_save};
@@ -131,6 +136,13 @@ pub fn run() {
             provider_delete,
             provider_test,
             provider_discover_models,
+            model_list,
+            model_list_for_provider,
+            model_add,
+            model_delete,
+            provider_model_add,
+            provider_model_remove,
+            provider_model_set_default,
             generate_submit,
             generate_cancel,
             task_list,

@@ -4,6 +4,7 @@ import { isSeedEnabled, normalizeQuality, normalizeSize } from "./capabilities.t
 /** 工作台表单 → 提交请求。唯一组装点，批量导入与重试都复用它。 */
 export interface FormInput {
   providerId: string;
+  modelId?: string | null;
   prompt: string;
   n: number;
   size: string;
@@ -20,6 +21,7 @@ export function buildGenerateRequest(input: FormInput, caps?: Capabilities): Gen
   const seed = caps && !isSeedEnabled(caps) ? undefined : parseSeed(input.seed);
   const request: GenerateRequest = {
     provider_id: input.providerId,
+    model_id: input.modelId || undefined,
     prompt: input.prompt,
     n: Math.min(MAX_N, Math.max(1, Math.trunc(input.n) || 1)),
     refs: input.refs,

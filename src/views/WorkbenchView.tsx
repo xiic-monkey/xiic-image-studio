@@ -9,6 +9,7 @@ import { normalizeQuality, normalizeSize } from "../lib/capabilities";
 import { filesToRefs } from "../lib/ref-image";
 import { pickPrefillPrompt } from "../lib/submission";
 import { useAssets } from "../stores/assets";
+import { useModels } from "../stores/models";
 import { usePrefill } from "../stores/prefill";
 import { useProviders } from "../stores/providers";
 import type { TemplateItem } from "../templates";
@@ -26,6 +27,7 @@ import TemplatePanel from "./workbench/TemplatePanel";
 export default function WorkbenchView() {
   const [notice, setNotice] = useState<string | null>(null);
   const { providers, load } = useProviders();
+  const { models, load: loadModels } = useModels();
   const { tasks, imgUrls, upsert, cancel, remove } = useTaskFeed();
   const { sessions, sessionId, selectSession, newSession, deleteSession, renameSession } = useSessions(setNotice);
   const { form, setForm, patch } = useDraft(sessionId, sessions);
@@ -37,9 +39,17 @@ export default function WorkbenchView() {
   const [presetOpen, setPresetOpen] = useState(false);
   const [dragOver, setDragOver] = useState(false);
 
+  const provider = providers.find((p) => p.id === form.providerId);
+  // 当前供应商挂的模型（按关联），模型下拉只列这些；能力表取自选中模型而非 provider 旧列。
+  // modelList 返回全局模型（linked=false），归属只看 provider.model_ids，不要再用 linked 过滤。
+  const providerModels = models.filter((m) => provider?.model_ids?.includes(m.id));
+  const selectedModel = providerModels.find((m) => m.id === form.modelId) ?? providerModels[0];
+  const caps = selectedModel?.capabilities ?? provider?.capabilities;
+
   const { submit, importBatch, retry, submitting } = useSubmissions({
     providers,
     providerId: form.providerId,
+    caps,
     form,
     refs,
     mask,
@@ -49,15 +59,13 @@ export default function WorkbenchView() {
     clearRefs: () => { clearAssetRefs(); setMask(null); },
     setNotice,
   });
-
-  const provider = providers.find((p) => p.id === form.providerId);
-  const caps = provider?.capabilities;
   const prefill = usePrefill((s) => s.prefill);
   const clearPrefill = usePrefill((s) => s.clear);
 
   useEffect(() => {
     void load();
-  }, [load]);
+    void loadModels();
+  }, [load, loadModels]);
 
   // 用函数式更新读 prev：会话切换那一轮的 form 还是上个会话的，
   // 拿闭包里的旧值覆盖会把新会话草稿冲掉。
@@ -65,6 +73,14 @@ export default function WorkbenchView() {
     if (providers.length === 0) return;
     setForm((prev) => (prev.providerId ? prev : { ...prev, providerId: providers[0].id }));
   }, [providers, form.providerId, setForm]);
+
+  // 切换供应商后，若当前 modelId 不属于新供应商则清空，让 selectedModel 回落到其默认模型。
+  useEffect(() => {
+    if (!form.providerId || providerModels.length === 0) return;
+    if (!providerModels.some((m) => m.id === form.modelId)) {
+      patch({ modelId: providerModels[0].id });
+    }
+  }, [form.providerId, form.modelId, providerModels, patch]);
 
   // 切换供应商/模型后旧的尺寸/质量可能不在新能力表内。只在展示层回落，
   // 不改草稿：写回表单会在切会话那一轮把新会话的草稿当成旧会话的来覆盖；
@@ -122,6 +138,7 @@ export default function WorkbenchView() {
       quality: p.quality ?? prev.quality,
       seed: p.seed != null ? String(p.seed) : prev.seed,
       providerId: p.provider_id ?? prev.providerId,
+      modelId: p.model_id ?? "",
     }));
     setPresetOpen(false);
     setNotice(`已套用配方「${p.name}」`);
@@ -147,21 +164,36 @@ export default function WorkbenchView() {
           onRename={renameSession}
         />
 
-        <div>
-          <label className={labelCls}>供应商 / 模型</label>
-          <Select
-            className={selCls}
-            value={form.providerId}
-            onChange={(v) => patch({ providerId: v })}
-            options={
-              providers.length === 0
-                ? [{ value: "", label: "（先去供应商页添加）" }]
-                : providers.map((p) => ({
-                    value: p.id,
-                    label: `${p.name} · ${p.model || PROTOCOL_LABELS[p.protocol]}`,
-                  }))
-            }
-          />
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className={labelCls}>供应商</label>
+            <Select
+              className={selCls}
+              value={form.providerId}
+              onChange={(v) => patch({ providerId: v, modelId: "" })}
+              options={
+                providers.length === 0
+                  ? [{ value: "", label: "（先去供应商页添加）" }]
+                  : providers.map((p) => ({ value: p.id, label: p.name }))
+              }
+            />
+          </div>
+          <div>
+            <label className={labelCls}>模型</label>
+            <Select
+              className={selCls}
+              value={selectedModel?.id ?? ""}
+              onChange={(v) => patch({ modelId: v })}
+              options={
+                providerModels.length === 0
+                  ? [{ value: "", label: "（先在供应商页挂模型）" }]
+                  : providerModels.map((m) => ({
+                      value: m.id,
+                      label: m.label || m.model_name || PROTOCOL_LABELS[m.protocol],
+                    }))
+              }
+            />
+          </div>
         </div>
 
         <div>
@@ -245,6 +277,7 @@ export default function WorkbenchView() {
               quality: form.quality,
               seed: form.seed,
               providerId: form.providerId,
+              modelId: form.modelId,
             }}
             onNotice={setNotice}
           />

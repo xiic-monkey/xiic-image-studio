@@ -48,6 +48,18 @@ pub fn join_url(base: &str, path: &str) -> String {
     format!("{base}{path}")
 }
 
+/// 拼「base 可能已带版本前缀」的 URL：base 结尾已有 prefix 就不重复加。
+/// 方舟的 base 既可能填 "https://ark.cn-beijing.volces.com"，
+/// 也可能照抄文档填 ".../api/v3"，两种都得能拼对。
+pub fn join_with_prefix(base: &str, prefix: &str, path: &str) -> String {
+    let base = base.trim_end_matches('/');
+    if base.ends_with(prefix) {
+        format!("{base}{path}")
+    } else {
+        format!("{base}{prefix}{path}")
+    }
+}
+
 pub fn apply_headers(
     mut rb: reqwest::RequestBuilder,
     custom: &BTreeMap<String, String>,
@@ -74,6 +86,8 @@ async fn probe(draft: &ProviderDraft, key: &str) -> AppResult<(u16, String)> {
         Protocol::OpenAiImages | Protocol::OpenAiChatImage => (join_url(&base, "/v1/models"), true),
         Protocol::GeminiNative => (join_url(&base, "/v1beta/models"), false),
         Protocol::MidjourneyProxy => (join_url(&base, "/mj/task/list"), true),
+        Protocol::VolcengineArk => (join_with_prefix(&base, "/api/v3", "/models"), true),
+        Protocol::DashScope => (join_with_prefix(&base, "/api/v1", "/models"), true),
     };
 
     let mut rb = client.get(&url);
@@ -204,12 +218,103 @@ pub async fn discover_models(draft: &ProviderDraft, key: &str) -> AppResult<Disc
             ],
             message: "MJ-Proxy 固定模型名".into(),
         }),
+        // 方舟与百炼的模型列表都是 OpenAI 风格的 data 数组，只是字段名不完全一致，
+        // 这里对常见字段名都做兼容，避免因为字段名差异就一个模型都发现不了。
+        Protocol::VolcengineArk | Protocol::DashScope => {
+            let client = http_client();
+            let base = draft.base_url.trim();
+            let url = if draft.protocol == Protocol::VolcengineArk {
+                join_with_prefix(base, "/api/v3", "/models")
+            } else {
+                join_with_prefix(base, "/api/v1", "/models")
+            };
+            let rb = apply_headers(openai_auth(client.get(&url), key), &draft.custom_headers);
+            let resp = rb.send().await?;
+            let status = resp.status();
+            let body: Value = resp.json().await?;
+            if !status.is_success() {
+                return Err(AppError::Http(format!(
+                    "HTTP {}: {}",
+                    status,
+                    body.to_string().chars().take(300).collect::<String>()
+                )));
+            }
+            let mut models: Vec<String> = body["data"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| {
+                            m.get("id")
+                                .and_then(|v| v.as_str())
+                                .or_else(|| m.get("model_id").and_then(|v| v.as_str()))
+                                .or_else(|| m.get("model").and_then(|v| v.as_str()))
+                                .or_else(|| m.get("name").and_then(|v| v.as_str()))
+                                .map(|s| s.to_string())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            // 平台常把文本模型一并返回，图像模型名里基本都带 wan / image / seedream
+            let images_only: Vec<String> = models
+                .iter()
+                .filter(|m| {
+                    let lower = m.to_ascii_lowercase();
+                    lower.contains("image")
+                        || lower.contains("wan")
+                        || lower.contains("seedream")
+                        || lower.contains("imagen")
+                })
+                .cloned()
+                .collect();
+            if !images_only.is_empty() {
+                models = images_only;
+            }
+            models.sort();
+            let n = models.len();
+            Ok(DiscoveredModels {
+                models,
+                message: format!("发现 {n} 个模型（含非生图模型，请自行挑选）"),
+            })
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::join_url;
+    use super::{join_url, join_with_prefix};
+
+    #[test]
+    fn join_with_prefix_adds_version_path_when_missing() {
+        assert_eq!(
+            join_with_prefix(
+                "https://ark.cn-beijing.volces.com",
+                "/api/v3",
+                "/images/generations"
+            ),
+            "https://ark.cn-beijing.volces.com/api/v3/images/generations"
+        );
+    }
+
+    #[test]
+    fn join_with_prefix_does_not_duplicate_existing_prefix() {
+        // 用户照抄文档把 /api/v3 写进 base 时不该拼成 /api/v3/api/v3
+        assert_eq!(
+            join_with_prefix(
+                "https://ark.cn-beijing.volces.com/api/v3",
+                "/api/v3",
+                "/images/generations"
+            ),
+            "https://ark.cn-beijing.volces.com/api/v3/images/generations"
+        );
+        assert_eq!(
+            join_with_prefix(
+                "https://ark.cn-beijing.volces.com/",
+                "/api/v3",
+                "/images/generations"
+            ),
+            "https://ark.cn-beijing.volces.com/api/v3/images/generations"
+        );
+    }
 
     #[test]
     fn base_with_v1_does_not_duplicate_version_segment() {

@@ -15,6 +15,12 @@ pub enum Protocol {
     /// Midjourney Proxy: /mj/submit/* + 轮询
     #[serde(rename = "midjourney_proxy")]
     MidjourneyProxy,
+    /// 火山方舟 Seedream: POST {base}/api/v3/images/generations（同步返回）
+    #[serde(rename = "volcengine_ark")]
+    VolcengineArk,
+    /// 阿里云百炼万相: POST {base}/api/v1/services/aigc/text2image/image-synthesis + 轮询任务
+    #[serde(rename = "dashscope")]
+    DashScope,
 }
 
 impl Protocol {
@@ -24,6 +30,8 @@ impl Protocol {
             Protocol::OpenAiChatImage => "openai_chat_image",
             Protocol::GeminiNative => "gemini_native",
             Protocol::MidjourneyProxy => "midjourney_proxy",
+            Protocol::VolcengineArk => "volcengine_ark",
+            Protocol::DashScope => "dashscope",
         }
     }
 
@@ -33,6 +41,8 @@ impl Protocol {
             "openai_chat_image" => Some(Protocol::OpenAiChatImage),
             "gemini_native" => Some(Protocol::GeminiNative),
             "midjourney_proxy" => Some(Protocol::MidjourneyProxy),
+            "volcengine_ark" => Some(Protocol::VolcengineArk),
+            "dashscope" => Some(Protocol::DashScope),
             _ => None,
         }
     }
@@ -43,6 +53,8 @@ impl Protocol {
             Protocol::OpenAiImages | Protocol::OpenAiChatImage => "https://api.openai.com",
             Protocol::GeminiNative => "https://generativelanguage.googleapis.com",
             Protocol::MidjourneyProxy => "https://mj.example.com",
+            Protocol::VolcengineArk => "https://ark.cn-beijing.volces.com",
+            Protocol::DashScope => "https://dashscope.aliyuncs.com",
         }
     }
 }
@@ -90,6 +102,9 @@ pub struct ProviderListItem {
     pub updated_at: String,
     /// 该协议+模型实际接受的参数（前端据此收敛控件，适配器据此发参）
     pub capabilities: crate::capabilities::Capabilities,
+    /// 挂在这个供应商下的模型 id（多对多关联；前端据此渲染模型下拉）
+    #[serde(default)]
+    pub model_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -35,6 +35,8 @@ xiic-image-studio generate --prompt "融合这两张" --ref a.png --ref b.png --
 | gemini_native + `gemini-*` | ✅ |
 | gemini_native + `imagen-*` | ❌（走 `:predict` 端点） |
 | midjourney_proxy | ✅（`base64Array`） |
+| volcengine_ark | ✅（`image` 字段，最多 10 张） |
+| dashscope | ❌（文生图端点 `image-synthesis` 不收参考图） |
 
 给不支持的模型带图，CLI 会**直接报错**并指出该走哪个端点：
 

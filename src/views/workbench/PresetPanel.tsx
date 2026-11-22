@@ -7,7 +7,7 @@ interface Props {
   /** 套用配方：把提示词与参数一起送回工作台。 */
   onApply: (p: PresetItem) => void;
   /** 当前表单快照，用来「存为配方」时预填。 */
-  current: { prompt: string; size: string; quality: string; seed: string; providerId: string };
+  current: { prompt: string; size: string; quality: string; seed: string; providerId: string; modelId: string };
   onNotice: (msg: string) => void;
 }
 
@@ -42,6 +42,7 @@ export default function PresetPanel({ onApply, current, onNotice }: Props) {
         quality: current.quality || null,
         seed: current.seed.trim() ? Number(current.seed.trim()) : null,
         provider_id: current.providerId || null,
+        model_id: current.modelId || null,
       });
       setName("");
       await reload();

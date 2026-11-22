@@ -7,6 +7,7 @@ import {
   PROTOCOL_LABELS,
   PROTOCOL_PRESET_MODELS,
   PROTOCOL_PRESET_URL,
+  PROVIDER_TEMPLATES,
   type Protocol,
   type ProviderListItem,
   type TestResult,
@@ -38,6 +39,9 @@ export default function ProviderForm({ editing, onClose }: Props) {
   const [testResult, setTestResult] = useState<TestResult | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  // 模板：选一个就把名称/baseUrl/协议/常用模型填好，Key 仍需自己填
+  const [templateId, setTemplateId] = useState("");
+  const [templateModels, setTemplateModels] = useState<string[]>([]);
 
   const draft = () => ({
     id: editing?.id ?? null,
@@ -56,6 +60,19 @@ export default function ProviderForm({ editing, onClose }: Props) {
       setBaseUrl(PROTOCOL_PRESET_URL[p]);
       setModel(PROTOCOL_PRESET_MODELS[p][0] ?? "");
     }
+  };
+
+  /** 套用模板：填好名称/baseUrl/协议，并列出该模板的常用模型供勾选。 */
+  const applyTemplate = (id: string) => {
+    setTemplateId(id);
+    const t = PROVIDER_TEMPLATES.find((x) => x.id === id);
+    if (!t) return;
+    setName(t.name);
+    setBaseUrl(t.base_url);
+    setProtocol(t.protocol);
+    setTemplateModels(t.models);
+    setModel(t.models[0] ?? "");
+    setNotice(t.note ? `已套用模板：${t.note}` : "已套用模板");
   };
 
   const runTest = async () => {
@@ -91,8 +108,9 @@ export default function ProviderForm({ editing, onClose }: Props) {
     }
     setSaving(true);
     try {
+      const id = editing?.id ?? crypto.randomUUID();
       await api.providerSave({
-        id: editing?.id ?? crypto.randomUUID(),
+        id,
         name: name.trim(),
         base_url: baseUrl.trim(),
         protocol,
@@ -102,6 +120,12 @@ export default function ProviderForm({ editing, onClose }: Props) {
         ),
         api_key: apiKey.trim() ? apiKey.trim() : null,
       });
+      // 模板勾选的模型：建好模型实体并挂到这家供应商下（模型是全局实体，多家可共用）
+      const wanted = templateId ? templateModels : [];
+      for (const modelName of wanted) {
+        const mid = await api.modelAdd({ protocol, model_name: modelName, label: "" });
+        await api.providerModelAdd(id, mid);
+      }
       await reload();
       onClose();
     } catch (e) {
@@ -123,6 +147,47 @@ export default function ProviderForm({ editing, onClose }: Props) {
         </h2>
 
         <div className="space-y-4">
+          {!editing && (
+            <div className="rounded-lg border border-neutral-200 p-3 dark:border-neutral-800">
+              <label className={labelCls}>从模板快速开始</label>
+              <Select
+                className={inputCls}
+                value={templateId}
+                onChange={(v) => applyTemplate(v)}
+                options={[
+                  { value: "", label: "（不用模板，手动填）" },
+                  ...PROVIDER_TEMPLATES.map((t) => ({ value: t.id, label: t.name })),
+                ]}
+              />
+              {templateId && templateModels.length > 0 && (
+                <div className="mt-2 space-y-1">
+                  <p className="text-xs text-neutral-500">
+                    保存时一并建好模型并挂到这家供应商下（模型是全局实体，别家也能挂）：
+                  </p>
+                  {templateModels.map((m) => (
+                    <label
+                      key={m}
+                      className="flex items-center gap-2 text-xs text-neutral-600 dark:text-neutral-300"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={templateModels.includes(m)}
+                        onChange={(e) =>
+                          setTemplateModels(
+                            e.target.checked
+                              ? [...templateModels, m]
+                              : templateModels.filter((x) => x !== m),
+                          )
+                        }
+                      />
+                      {m}
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
           <div>
             <label className={labelCls}>名称</label>
             <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} placeholder="如：OpenAI 官方" />
@@ -158,7 +223,9 @@ export default function ProviderForm({ editing, onClose }: Props) {
           </div>
 
           <div>
-            <label className={labelCls}>模型</label>
+            <label className={labelCls}>
+              模型（可留空；填了会顺带挂到这个供应商下，完整管理在「模型库」）
+            </label>
             <div className="flex gap-2">
               <input className={inputCls} value={model} onChange={(e) => setModel(e.target.value)} placeholder="gpt-image-2.5" list="discovered-models" />
               <button
