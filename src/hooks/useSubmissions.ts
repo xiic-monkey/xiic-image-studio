@@ -2,11 +2,17 @@ import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../ipc";
 import { parseBatch } from "../lib/batch-parse.ts";
+import { isSeedEnabled } from "../lib/capabilities.ts";
 import type { DraftForm } from "../lib/draft.ts";
 import { errorMessage } from "../lib/error";
 import { buildGenerateRequest } from "../lib/request.ts";
 import { canRetry, retryRequest } from "../lib/retry.ts";
-import { buildSubmissions, remainingText } from "../lib/submission.ts";
+import {
+  buildScanSubmissions,
+  buildSubmissions,
+  parseSeedBase,
+  remainingText,
+} from "../lib/submission.ts";
 import type { ProviderListItem, RefImage, TaskUpsert, TaskView } from "../types";
 
 export interface SubmissionContext {
@@ -49,7 +55,15 @@ export function useSubmissions(ctx: SubmissionContext) {
       return;
     }
     const { form } = ctx;
-    const submissions = buildSubmissions(form.prompt, form.batchMode, form.count);
+    // 扫描模式按能力表判定：模型不支持 seed 时明确拒绝，
+    // 不能静默按「无种子」提交一串重复任务（那是白花钱）。
+    if (form.scanMode && !isSeedEnabled(provider.capabilities)) {
+      ctx.setNotice("当前模型不支持种子，无法使用种子扫描");
+      return;
+    }
+    const submissions = form.scanMode
+      ? buildScanSubmissions(form.prompt, parseSeedBase(form.seed), form.scanCount)
+      : buildSubmissions(form.prompt, form.batchMode, form.count);
     if (submissions.length === 0) {
       ctx.setNotice("请输入提示词");
       return;
@@ -69,7 +83,8 @@ export function useSubmissions(ctx: SubmissionContext) {
               n: s.n,
               size: form.size,
               quality: form.quality,
-              seed: form.seed,
+              // 扫描模式下每条任务带自己的种子；其余场景沿用表单里的种子
+              seed: s.seed !== undefined ? String(s.seed) : form.seed,
               refs: ctx.refs,
               mask: ctx.mask,
               sessionId: ctx.sessionId,
@@ -100,7 +115,9 @@ export function useSubmissions(ctx: SubmissionContext) {
               : null,
         );
       } else {
-        ctx.patch({ prompt: remainingText(submissions, submitted) });
+        // 扫描模式下每条任务的提示词都相同，remainingText 会拼出 N 份重复文本。
+        // 失败时保留原始提示词即可——重扫一遍比看一堆重复行有用。
+        ctx.patch({ prompt: form.scanMode ? form.prompt : remainingText(submissions, submitted) });
         ctx.setNotice(`已提交 ${submitted}/${submissions.length} 条，第 ${submitted + 1} 条提交失败：${failMsg}`);
       }
     } catch (e) {

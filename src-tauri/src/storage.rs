@@ -88,6 +88,17 @@ pub fn init(conn: &Connection) -> AppResult<()> {
             updated_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS presets (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            prompt TEXT NOT NULL,
+            size TEXT,
+            quality TEXT,
+            seed INTEGER,
+            provider_id TEXT,
+            created_at TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_images_created ON images(created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_images_task ON images(task_id);

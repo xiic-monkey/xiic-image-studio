@@ -1,12 +1,16 @@
 interface Props {
   submitting: boolean;
   tplOpen: boolean;
+  presetOpen: boolean;
   onToggleTemplates: () => void;
+  onTogglePresets: () => void;
   onImportBatch: () => void;
   onSubmit: () => void;
 }
 
-export default function SubmitBar({ submitting, tplOpen, onToggleTemplates, onImportBatch, onSubmit }: Props) {
+export default function SubmitBar({
+  submitting, tplOpen, presetOpen, onToggleTemplates, onTogglePresets, onImportBatch, onSubmit,
+}: Props) {
   return (
     <div className="flex gap-2">
       <button
@@ -15,6 +19,12 @@ export default function SubmitBar({ submitting, tplOpen, onToggleTemplates, onIm
         aria-expanded={tplOpen}
         disabled={submitting}
       >模板</button>
+      <button
+        className="rounded-md border border-neutral-300 px-3 py-1.5 text-sm text-neutral-700 hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-800"
+        onClick={onTogglePresets}
+        aria-expanded={presetOpen}
+        disabled={submitting}
+      >配方</button>
       <button
         className="rounded-md border border-neutral-300 px-3 py-1.5 text-sm text-neutral-700 hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-800"
         onClick={onImportBatch}

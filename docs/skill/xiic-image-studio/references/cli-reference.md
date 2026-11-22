@@ -32,6 +32,29 @@ xiic-image-studio providers [--json]
 列出已配置的 provider：名称、协议、模型、是否已配 Key。`--json` 时输出完整
 `ProviderListItem`（含 `capabilities` 能力表）。
 
+### `export`
+
+```
+xiic-image-studio export --out <文件.jsonl> [选项]
+```
+
+把画廊里的图导出成 JSONL 记录（提示词 + 实际下发的尺寸/质量/种子 + 原图路径）。
+
+| 参数 | 说明 |
+|---|---|
+| `--out <文件>` | **必填**。导出目标，必须是 `.jsonl` / `.ndjson` 后缀，目录必须已存在。 |
+| `--q <关键词>` | 按提示词模糊过滤，与 GUI 搜索同语义。 |
+| `--model <模型名>` | 按模型过滤。 |
+| `--fav` | 只导出收藏。也接受 `--favorite` / `--favorites`。 |
+| `--limit <条数>` | 最多导出多少条，默认 5000。 |
+
+输出：stdout 一行 `已导出 N 张图的记录到 <路径>`。
+
+**导出文件能被 GUI 的「导入批量」原样读回**——字段名（`prompt` / `size` /
+`quality` / `seed`）与批量导入格式一致。所以它不是存档，而是「把这批参数
+再批量跑一遍」的往返管道。文件里另有 `model` / `path` / `created_at` /
+`favorite` 四个附加字段，导入时会被忽略。
+
 ### 其他
 
 ```

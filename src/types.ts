@@ -188,6 +188,18 @@ export interface PromptItem {
   created_at: string;
 }
 
+/** 一份可复用的生成配方：提示词 + 能让它复现的参数。 */
+export interface PresetItem {
+  id: string;
+  name: string;
+  prompt: string;
+  size?: string | null;
+  quality?: string | null;
+  seed?: number | null;
+  provider_id?: string | null;
+  created_at: string;
+}
+
 export interface SessionItem {
   id: string;
   name: string;
@@ -199,6 +211,8 @@ export interface SessionItem {
     count?: number;
     seed?: string;
     batchMode?: boolean;
+    scanMode?: boolean;
+    scanCount?: number;
   };
   updated_at: string;
 }

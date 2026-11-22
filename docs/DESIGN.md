@@ -1,6 +1,6 @@
 # xiic-image-studio 设计文档
 
-> 版本 v0.4 · 2026-11-21 · 状态：MVP + Phase 2 主要功能已实现（含 CLI 无头模式、GUI/CLI/MJ 统一编排层）
+> 版本 v0.5 · 2026-11-22 · 状态：MVP + Phase 2 主要功能已实现（含 CLI 无头模式、GUI/CLI/MJ 统一编排层、画廊导出与种子扫描）
 
 ## 1. 定位
 
@@ -85,10 +85,20 @@ ProviderConfig {
 12. **预设模板库**：内置电商/头像/插画/摄影四类场景模板，工作台「模板」按钮插入（追加到提示词，可选带 size/quality）
 
 ### Phase 3（M5+，已实现）
-13. **CLI 无头模式**：`xiic-image-studio generate|providers`（不占端口、非常驻），对外暴露
-    `generate`（含 `--ref` 参考图）与 `providers`。
+13. **CLI 无头模式**：`xiic-image-studio generate|providers|export`（不占端口、非常驻），对外暴露
+    `generate`（含 `--ref` 参考图）、`providers` 与 `export`（导出画廊 JSONL）。
     与 GUI 共用 `pipeline::prepare_task`（唯一建任务行）和 `run_task_headless`，同库、同 adapters、
     同落库规则、同 `images/` 目录；前端靠轮询发现无头进程写入的任务。详见 §10。
+14. **画廊导出 JSONL**：GUI「导出 JSONL」按钮与 CLI `export` 子命令共用
+    `gallery::query_images` + `export_rows` + `write_jsonl`。导出字段（prompt/size/quality/seed）
+    与「导入批量」的 `BatchItem` 对齐，**导出的文件能原样导回再跑一遍**——导入与导出构成闭环，
+    不是单向存档。
+15. **种子扫描**：工作台「种子扫描」开关。开启后一条提示词按连续种子拆成多个任务
+    （每任务 n=1、seed 逐个 +1），用于探索同一提示词在不同 seed 下的差异。
+    模型不支持 seed 时**明确拒绝**（提交入口按能力表判定），不静默退化成「同一提示词随机出 N 张」。
+16. **配方预设**：提示词 + 尺寸 + 质量 + 种子 + 供应商的组合存成可复用配方。
+    画廊右键「存为配方」从一张成功的图直接存参数组合，工作台「配方」面板一键套用。
+    与 `prompts` 表分开存：提示词库存文本，配方存的是「文本 + 能让它复现的参数」。
 
 ### 参数说明（已对齐实现）
 - **seed（随机种子）**：由「协议 × 模型能力表」（`src-tauri/src/capabilities.rs`）决定是否下发。openai_chat_image 走请求体顶层（Chat Completions 标准参数）；gemini_native 走 `generationConfig.seed`；**openai_images 不下发**（Images API 规范里没有该字段，官方与转 OpenAI 的中转站都会 400）。上游不支持时静默忽略，不影响其他参数。
@@ -148,6 +158,7 @@ tasks       (id, session_id, provider_id, protocol, request_json, status,
 images      (id, task_id, path, thumb_path, prompt, model, params_json,
              favorite, width, height, size, created_at)    -- task_id REFERENCES tasks(id) ON DELETE SET NULL（可空）
 prompts     (id, title, content, tags)
+presets     (id, name, prompt, size, quality, seed, provider_id, created_at)  -- 生成配方
 ```
 
 - 外键是真声明的（不是只开 `PRAGMA foreign_keys`）：`tasks.session_id` → `sessions(id)`、
@@ -178,15 +189,15 @@ xiic-image-studio/
 │   ├── provider/{client,commands,db,mod,types}.rs   # 四协议 + 模型发现 + 测试
 │   ├── generate/{adapters,client,commands,mod,types,pipeline}.rs
 │   │       # pipeline = 唯一编排层；mod = 底层原语；adapters = 四协议 + MJ action
-│   ├── cli.rs                     # generate / providers 无头模式
+│   ├── cli.rs                     # generate / export / providers 无头模式
 │   ├── media.rs                   # ffmpeg sidecar + 缩略图
 │   ├── crypto.rs                  # AES-256-GCM 本地密钥
 │   ├── capabilities.rs            # 协议 × 模型能力表（尺寸/质量/seed/参考图/蒙版/端点），唯一事实源
-│   ├── {storage,sessions,gallery,prompts,error}.rs
+│   ├── {storage,sessions,gallery,prompts,presets,error}.rs
 ├── src/
 │   ├── views/{Workbench,Gallery,Providers,Prompts,Tools}View.tsx
 │   ├── views/workbench/{SessionTabs,SessionContextMenu,RefImages,ParamRow,
-│   │       SubmitBar,TemplatePanel,MaskEditorLayer,styles}.tsx/.ts  # 工作台展示层
+│   │       SubmitBar,TemplatePanel,PresetPanel,MaskEditorLayer,styles}.tsx/.ts  # 工作台展示层
 │   ├── hooks/{useTaskFeed,useSessions,useDraft,useSubmissions}.ts  # 轮询/会话/草稿/提交副作用
 │   ├── components/{TaskPanel,MaskEditor,ProviderForm,Select,TrafficLights}.tsx
 │   ├── stores/{prefill,providers}.ts
@@ -213,7 +224,7 @@ xiic-image-studio/
 
 ## 10. CLI 无头模式（已实现）
 
-- 形态：`xiic-image-studio generate` / `xiic-image-studio providers`，
+- 形态：`xiic-image-studio generate` / `xiic-image-studio export` / `xiic-image-studio providers`，
   无 HTTP / SSE / socket / daemon、零端口非常驻，跑完即退。
 - 入口最简：直连 `src-tauri/target/release/xiic-image-studio`（skill 的 `scripts/xiic.js`
   按 `XIIC_IMAGE_STUDIO_BIN` → PATH → release 目录 → `/Applications/...app` 顺序找它）。
@@ -296,7 +307,15 @@ xiic-image-studio/
 - **ffmpeg webp**：macOS 上 brew 版 ffmpeg 默认不带 libwebp，选 webp 会报错；打包用的 sidecar 自带 webp。
 - **seed 兼容性**：是否下发由能力表决定（openai_chat_image / gemini_native 下发，openai_images 不下发）；
   部分中转站无视该字段属正常。
-- **批量任务导出**：目前只支持导入，尚未做「把画廊/任务导出成 JSONL」的反向流水线。
+- **批量任务导出**：已做。GUI「导出 JSONL」与 CLI `export` 共用
+  `gallery::query_images` / `export_rows` / `write_jsonl`，导出字段与「导入批量」对齐，
+  导出的文件能原样导回再跑一遍。
+- **种子扫描的可用面**：只有能力表 `seed=true` 的协议（openai_chat_image / gemini_native）
+  能用；openai_images 规范里没有 seed 字段，能力表 `seed=false`，扫描会被明确拒绝。
+  也就是说在 gpt-image / dall-e 这类模型上扫描不可用——这是上游限制，不是实现缺口。
+- **画廊并排对比 / 批量收藏淘汰**：未做。画廊目前只有收藏与搜索两种筛选。
+- **批量导出图片本体 / 工作区备份**：未做。`export` 只导出记录（含原图绝对路径），
+  不打包图片文件，也不导出数据库与供应商配置。
 - **批量开关与蒙版涂抹的 GUI 手工验证**：底层纯函数与单测已覆盖（提交语义、蒙版几何换算），
   但 UI 接线还没有人工点过一遍（见 `docs/superpowers/plans/2026-10-31-p0-3-p0-5-fixes.md` 里
   仍未勾选的两步）。
@@ -304,6 +323,9 @@ xiic-image-studio/
   `refs=false` 的端点；CLI 仍先显式报错再走裁剪）；`tools_file_b64` 改为复用
   `generate::read_file_b64`，带 `canonicalize()` + 目录越界校验，只认 `app_data/images/tools`
   内的工具箱输出，不再能读任意路径。
+- **画廊行解析容忍 NULL**：`width`/`height`/`size`/`thumb_path` 四列可空，
+  原实现按 `i64` / `String` 直接取，NULL 会让整行报错、再被 `filter_map(|r| r.ok())`
+  静默丢掉——缺尺寸的历史图会在画廊里凭空消失。现在缺值按 0 / 空串处理。
 - **前端无 ESLint / Prettier 配置**：目前靠 TypeScript strict + `noUnusedLocals` +
   `node --test` 兜底；`react-hooks/exhaustive-deps` 一类规则还没纳入检查。
 - **未做运行时冒烟**：GUI（提交→DB `session_id`、删会话置 NULL、重试保留 seed、MJ U/V 进度、

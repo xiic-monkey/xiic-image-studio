@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { save } from "@tauri-apps/plugin-dialog";
 import { api } from "../ipc";
 import { errorMessage } from "../lib/error";
 import { dataUrlToRef, MAX_REFS } from "../lib/ref-image";
@@ -168,6 +169,41 @@ export default function GalleryView() {
     }
   };
 
+  // 导出当前筛选条件下的图记录为 JSONL。字段与「导入批量」一致，
+  // 导出的文件能原样导回去再跑一遍。
+  const exportJsonl = async () => {
+    try {
+      const path = await save({
+        defaultPath: "xiic-gallery.jsonl",
+        filters: [{ name: "JSONL", extensions: ["jsonl"] }],
+      });
+      if (!path) return;
+      const n = await api.galleryExportJsonl(path, { q, favoriteOnly: favOnly });
+      setNoticeToast(`已导出 ${n} 张图的记录`);
+    } catch (err) {
+      setNoticeToast(errorMessage(err));
+    }
+  };
+
+  // 把这张图的提示词与参数存成配方，之后可在工作台一键套用。
+  const saveAsPreset = async (it: GalleryItem) => {
+    const name = prompt("配方名", it.prompt.slice(0, 20) || "未命名配方");
+    if (!name?.trim()) return;
+    try {
+      await api.presetSave({
+        name: name.trim(),
+        prompt: it.prompt,
+        size: it.params?.size ?? null,
+        quality: it.params?.quality ?? null,
+        seed: it.params?.seed ?? null,
+        provider_id: null,
+      });
+      setNoticeToast(`已存为配方「${name.trim()}」`);
+    } catch (err) {
+      setNoticeToast(errorMessage(err));
+    }
+  };
+
   // 右键菜单点外部关闭；画廊滚动时也要关，避免菜单悬在错误的位置
   useEffect(() => {
     if (!ctx) return;
@@ -201,6 +237,13 @@ export default function GalleryView() {
           onClick={() => setFavOnly(!favOnly)}
         >
           ★ 收藏
+        </button>
+        <button
+          className="rounded-md border border-neutral-300 px-3 py-2 text-sm text-neutral-600 hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-300"
+          onClick={() => void exportJsonl()}
+          title="把当前筛选出的图导出为 JSONL，格式与「导入批量」一致，可原样导回"
+        >
+          导出 JSONL
         </button>
         <span className="ml-auto text-xs text-neutral-400">{items.length} 张</span>
       </div>
@@ -271,6 +314,16 @@ export default function GalleryView() {
           >
             继续生成
           </button>
+          <button
+            className="block w-full px-3 py-1.5 text-left hover:bg-neutral-100 dark:hover:bg-neutral-800"
+            onClick={() => {
+              const item = items.find((it) => it.id === ctx.id);
+              setCtx(null);
+              if (item) void saveAsPreset(item);
+            }}
+          >
+            存为配方
+          </button>
         </div>
       )}
 
@@ -293,6 +346,7 @@ export default function GalleryView() {
                 {items[preview].favorite ? "★ 已收藏" : "☆ 收藏"}
               </button>
               <button className="rounded bg-white/10 px-3 py-1.5 hover:bg-white/20" onClick={() => refilling(items[preview])}>回填参数</button>
+              <button className="rounded bg-white/10 px-3 py-1.5 hover:bg-white/20" onClick={() => void saveAsPreset(items[preview])}>存为配方</button>
               <button className="rounded bg-white/10 px-3 py-1.5 hover:bg-white/20" onClick={() => void addAsRef(items[preview])}>加入参考图</button>
               <button className="rounded bg-orange-600 px-3 py-1.5 hover:bg-orange-500" onClick={() => void continueGenerating(items[preview])}>继续生成</button>
               <button className="rounded bg-white/10 px-3 py-1.5 hover:bg-white/20" onClick={() => api.imageReveal(items[preview].id)}>在 Finder 显示</button>

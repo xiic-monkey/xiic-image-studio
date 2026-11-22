@@ -9,6 +9,10 @@ export interface DraftForm {
   count: number;
   seed: string;
   batchMode: boolean;
+  /** 种子扫描：把一条提示词按连续 seed 拆成多个任务 */
+  scanMode: boolean;
+  /** 扫描产出的张数（= 任务数，每任务 1 张） */
+  scanCount: number;
 }
 
 export const EMPTY_DRAFT: DraftForm = {
@@ -19,6 +23,8 @@ export const EMPTY_DRAFT: DraftForm = {
   count: 1,
   seed: "",
   batchMode: false,
+  scanMode: false,
+  scanCount: 4,
 };
 
 export type SessionDraft = SessionItem["draft"];
@@ -32,6 +38,8 @@ export function draftFromForm(form: DraftForm): SessionDraft {
     count: form.count,
     seed: form.seed,
     batchMode: form.batchMode,
+    scanMode: form.scanMode,
+    scanCount: form.scanCount,
   };
 }
 
@@ -44,6 +52,8 @@ export function formFromDraft(draft: SessionDraft | undefined, fallback: DraftFo
     count: draft?.count ?? fallback.count,
     seed: draft?.seed ?? "",
     batchMode: draft?.batchMode ?? false,
+    scanMode: draft?.scanMode ?? false,
+    scanCount: draft?.scanCount ?? fallback.scanCount,
   };
 }
 
@@ -57,5 +67,7 @@ export function draftSignature(form: DraftForm): string {
     String(form.count),
     form.seed,
     form.batchMode ? "1" : "0",
+    form.scanMode ? "1" : "0",
+    String(form.scanCount),
   ].join("|");
 }

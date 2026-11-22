@@ -388,12 +388,79 @@ fn providers(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// 导出：把画廊里筛选出的图导成 JSONL，格式与「导入批量」一致，
+/// 导出文件可以直接再导回去跑一遍。
+#[derive(Debug, Default, PartialEq)]
+struct ExportArgs {
+    out: Option<String>,
+    q: Option<String>,
+    favorite_only: bool,
+    model: Option<String>,
+    limit: Option<u32>,
+}
+
+fn parse_export(args: &[String]) -> Result<ExportArgs> {
+    let mut out = ExportArgs::default();
+    let mut i = 0;
+    while i < args.len() {
+        let (name, inline) = split_inline(args[i].as_str());
+        match name {
+            "--out" | "--output" => out.out = Some(value_for(args, &mut i, inline, "--out")?),
+            "--q" | "--query" => out.q = Some(value_for(args, &mut i, inline, "--q")?),
+            "--model" => out.model = Some(value_for(args, &mut i, inline, "--model")?),
+            "--fav" | "--favorite" | "--favorites" => out.favorite_only = true,
+            "--limit" => {
+                let v = value_for(args, &mut i, inline, "--limit")?;
+                out.limit = Some(
+                    v.parse::<u32>()
+                        .with_context(|| format!("--limit 需要正整数，收到 '{v}'"))?,
+                );
+            }
+            other => bail!("未知参数 {other}（用 --help 查看用法）"),
+        }
+        i += 1;
+    }
+    Ok(out)
+}
+
+/// 导出画廊为 JSONL。`--out` 必填：写到 stdout 会污染管道，
+/// 而这个命令的产物本质是文件。
+fn export(args: &[String]) -> Result<()> {
+    let parsed = parse_export(args)?;
+    let path = parsed
+        .out
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("缺少 --out <文件路径>（导出目标是文件，不写 stdout）"))?;
+    let filter = crate::gallery::GalleryFilter {
+        q: parsed.q.clone(),
+        favorite_only: parsed.favorite_only,
+        model: parsed.model.clone(),
+        limit: parsed
+            .limit
+            .unwrap_or(crate::gallery::MAX_EXPORT_ROWS)
+            .clamp(1, crate::gallery::MAX_EXPORT_ROWS),
+        offset: 0,
+    };
+    let (_dir, db) = open_db()?;
+    let rows = {
+        let conn = db.conn();
+        let items = crate::gallery::query_images(&conn, &filter)?;
+        crate::gallery::export_rows(&items)
+    };
+    let n = crate::gallery::write_jsonl(path, &rows)?;
+    println!("已导出 {n} 张图的记录到 {path}");
+    Ok(())
+}
+
 fn print_help() {
     println!(
         "xiic-image-studio —— 本地 AI 图片工作室
 
 用法：
   xiic-image-studio generate --prompt <提示词> [选项]
+  xiic-image-studio export --out <文件.jsonl> [选项]
   xiic-image-studio providers [--json]
   xiic-image-studio --help | --version
   xiic-image-studio              （不带参数 = 启动图形界面）
@@ -407,6 +474,13 @@ generate 选项：
   --quality <high>       质量档（按模型能力裁剪）
   --seed <整数>          随机种子（部分模型不支持）
   --json                 以 JSON 输出，便于脚本消费
+
+export 选项：
+  --out <文件.jsonl>     必填，导出目标（必须是 .jsonl / .ndjson）
+  --q <关键词>           按提示词过滤
+  --model <模型名>       按模型过滤
+  --fav                  只导出收藏
+  --limit <条数>         最多导出多少条，默认 5000
 
 产物会写入工作室的同一个数据库与图库，打开图形界面即可看到。"
     );
@@ -431,8 +505,9 @@ pub fn run(args: Vec<String>) -> Result<()> {
             "MCP 模式已移除，请改用 CLI 子命令：`xiic-image-studio generate --prompt \"...\"`"
         ),
         "generate" => generate(&args[1..]),
+        "export" => export(&args[1..]),
         "providers" => providers(&args[1..]),
-        other => bail!("未知子命令 '{other}'（可用：generate / providers / --help）"),
+        other => bail!("未知子命令 '{other}'（可用：generate / export / providers / --help）"),
     }
 }
 
@@ -525,6 +600,39 @@ mod tests {
     fn unknown_subcommand_is_an_error() {
         let err = run(args(&["nope"])).unwrap_err();
         assert!(err.to_string().contains("未知子命令"), "实际：{err}");
+    }
+
+    #[test]
+    fn export_parses_all_options() {
+        let a = parse_export(&args(&[
+            "--out",
+            "/tmp/a.jsonl",
+            "--q",
+            "猫",
+            "--model",
+            "gpt-image-1",
+            "--fav",
+            "--limit",
+            "50",
+        ]))
+        .unwrap();
+        assert_eq!(a.out.as_deref(), Some("/tmp/a.jsonl"));
+        assert_eq!(a.q.as_deref(), Some("猫"));
+        assert_eq!(a.model.as_deref(), Some("gpt-image-1"));
+        assert!(a.favorite_only);
+        assert_eq!(a.limit, Some(50));
+    }
+
+    #[test]
+    fn export_requires_out() {
+        let err = export(&args(&["--q", "猫"])).unwrap_err();
+        assert!(err.to_string().contains("--out"), "实际：{err}");
+    }
+
+    #[test]
+    fn export_rejects_unknown_option() {
+        let err = parse_export(&args(&["--out", "/tmp/a.jsonl", "--wat"])).unwrap_err();
+        assert!(err.to_string().contains("未知参数"), "实际：{err}");
     }
 
     #[test]

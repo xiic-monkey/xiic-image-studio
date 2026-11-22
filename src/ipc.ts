@@ -1,7 +1,7 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
 import { hasTauriBridge, NOT_IN_APP_MESSAGE } from "./lib/tauri-env";
-import type { DiscoveredModels, GenerateRequest, GalleryItem, PromptItem, ProviderDraft, ProviderListItem, SaveInput, SessionItem, TaskItem, TaskProgress, TestResult } from "./types";
+import type { DiscoveredModels, GenerateRequest, GalleryItem, PresetItem, PromptItem, ProviderDraft, ProviderListItem, SaveInput, SessionItem, TaskItem, TaskProgress, TestResult } from "./types";
 
 /**
  * 预览模式（浏览器里打开 vite 前端、没有 Tauri 外壳）下没有 IPC 桥，
@@ -35,10 +35,22 @@ export const api = {
   imageSetFavorite: (id: string, favorite: boolean) => invoke<void>("image_set_favorite", { id, favorite }),
   imageDelete: (id: string) => invoke<void>("image_delete", { id }),
   imageReveal: (id: string) => invoke<void>("image_reveal", { id }),
+  galleryExportJsonl: (path: string, opts?: { q?: string; favoriteOnly?: boolean; model?: string; limit?: number }) =>
+    invoke<number>("gallery_export_jsonl", {
+      path,
+      q: opts?.q ?? null,
+      favoriteOnly: opts?.favoriteOnly ?? null,
+      model: opts?.model ?? null,
+      limit: opts?.limit ?? null,
+    }),
   promptList: () => invoke<PromptItem[]>("prompt_list"),
   promptSave: (prompt: { id?: string; title: string; content: string; tags?: string[] }) =>
     invoke<string>("prompt_save", { prompt }),
   promptDelete: (id: string) => invoke<void>("prompt_delete", { id }),
+  presetList: () => invoke<PresetItem[]>("preset_list"),
+  presetSave: (preset: { id?: string; name: string; prompt: string; size?: string | null; quality?: string | null; seed?: number | null; provider_id?: string | null }) =>
+    invoke<string>("preset_save", { preset }),
+  presetDelete: (id: string) => invoke<void>("preset_delete", { id }),
   sessionList: () => invoke<SessionItem[]>("session_list"),
   sessionSave: (session: { id?: string; name?: string; draft?: unknown }) =>
     invoke<string>("session_save", { session }),

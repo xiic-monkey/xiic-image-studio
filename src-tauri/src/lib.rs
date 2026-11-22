@@ -7,14 +7,15 @@ pub mod error;
 pub mod generate;
 pub mod provider;
 
-mod gallery;
+pub mod gallery;
 mod media;
+mod presets;
 mod prompts;
 mod sessions;
 pub mod storage;
 
 use crate::error::AppResult;
-use gallery::{image_delete, image_list, image_reveal, image_set_favorite};
+use gallery::{gallery_export_jsonl, image_delete, image_list, image_reveal, image_set_favorite};
 use generate::commands::{
     generate_cancel, generate_submit, image_read_b64, mj_action, task_delete, task_list,
 };
@@ -23,6 +24,7 @@ use media::{
     tools_convert, tools_file_b64, tools_gif, tools_set_ffmpeg_path, tools_status,
     tools_video_frames,
 };
+use presets::{preset_delete, preset_list, preset_save};
 use prompts::{prompt_delete, prompt_list, prompt_save};
 use provider::commands::{
     provider_delete, provider_discover_models, provider_list, provider_save, provider_test,
@@ -138,9 +140,13 @@ pub fn run() {
             image_set_favorite,
             image_delete,
             image_reveal,
+            gallery_export_jsonl,
             prompt_list,
             prompt_save,
             prompt_delete,
+            preset_list,
+            preset_save,
+            preset_delete,
             session_list,
             session_save,
             session_delete,

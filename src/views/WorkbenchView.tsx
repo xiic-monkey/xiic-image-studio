@@ -12,9 +12,10 @@ import { useAssets } from "../stores/assets";
 import { usePrefill } from "../stores/prefill";
 import { useProviders } from "../stores/providers";
 import type { TemplateItem } from "../templates";
-import { PROTOCOL_LABELS, type RefImage } from "../types";
+import { PROTOCOL_LABELS, type PresetItem, type RefImage } from "../types";
 import MaskEditorLayer from "./workbench/MaskEditorLayer";
 import ParamRow from "./workbench/ParamRow";
+import PresetPanel from "./workbench/PresetPanel";
 import RefImages from "./workbench/RefImages";
 import SessionTabs from "./workbench/SessionTabs";
 import { inputCls, labelCls, selCls } from "./workbench/styles";
@@ -33,6 +34,7 @@ export default function WorkbenchView() {
   const [mask, setMask] = useState<RefImage | null>(null);
   const [maskEditing, setMaskEditing] = useState(false);
   const [tplOpen, setTplOpen] = useState(false);
+  const [presetOpen, setPresetOpen] = useState(false);
   const [dragOver, setDragOver] = useState(false);
 
   const { submit, importBatch, retry, submitting } = useSubmissions({
@@ -109,6 +111,22 @@ export default function WorkbenchView() {
     setTplOpen(false);
   };
 
+  // 套用配方：提示词整条替换，参数一并带上。
+  // 配方的尺寸/质量可能不在当前供应商的能力表内——提交时 buildGenerateRequest
+  // 会按能力表归一化，这里只管把值填回去，不必提前拦。
+  const applyPreset = (p: PresetItem) => {
+    setForm((prev) => ({
+      ...prev,
+      prompt: p.prompt,
+      size: p.size ?? prev.size,
+      quality: p.quality ?? prev.quality,
+      seed: p.seed != null ? String(p.seed) : prev.seed,
+      providerId: p.provider_id ?? prev.providerId,
+    }));
+    setPresetOpen(false);
+    setNotice(`已套用配方「${p.name}」`);
+  };
+
   return (
     <div className="flex h-full">
       {/* 左：参数区 */}
@@ -153,8 +171,10 @@ export default function WorkbenchView() {
               type="button"
               role="switch"
               aria-checked={form.batchMode}
+              disabled={form.scanMode}
+              title={form.scanMode ? "扫描模式已占用：一次提示词按种子拆任务" : undefined}
               onClick={() => setForm((prev) => ({ ...prev, batchMode: !prev.batchMode }))}
-              className={`rounded-md px-2 py-0.5 text-[11px] transition-colors ${
+              className={`rounded-md px-2 py-0.5 text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
                 form.batchMode
                   ? "bg-orange-100 font-medium text-orange-700 dark:bg-orange-950 dark:text-orange-400"
                   : "text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800"
@@ -189,10 +209,14 @@ export default function WorkbenchView() {
           quality={displayQuality}
           seed={form.seed}
           count={form.count}
+          scanMode={form.scanMode}
+          scanCount={form.scanCount}
           onSize={(v) => patch({ size: v })}
           onQuality={(v) => patch({ quality: v })}
           onSeed={(v) => patch({ seed: v })}
           onCount={(v) => patch({ count: v })}
+          onScanMode={(v) => setForm((prev) => ({ ...prev, scanMode: v, batchMode: v ? false : prev.batchMode }))}
+          onScanCount={(v) => patch({ scanCount: v })}
         />
 
         {notice && (
@@ -204,12 +228,27 @@ export default function WorkbenchView() {
         <SubmitBar
           submitting={submitting}
           tplOpen={tplOpen}
+          presetOpen={presetOpen}
           onToggleTemplates={() => setTplOpen((o) => !o)}
+          onTogglePresets={() => setPresetOpen((o) => !o)}
           onImportBatch={() => void importBatch()}
           onSubmit={() => void submit()}
         />
 
         {tplOpen && <TemplatePanel onPick={pickTemplate} onClose={() => setTplOpen(false)} />}
+        {presetOpen && (
+          <PresetPanel
+            onApply={applyPreset}
+            current={{
+              prompt: form.prompt,
+              size: form.size,
+              quality: form.quality,
+              seed: form.seed,
+              providerId: form.providerId,
+            }}
+            onNotice={setNotice}
+          />
+        )}
       </div>
 
       {/* 右：任务面板 */}

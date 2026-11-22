@@ -6,7 +6,17 @@ const form = { ...EMPTY_DRAFT, providerId: "p1", prompt: "cat", seed: "7" };
 
 test("draftFromForm 不含 refs / mask / session_id", () => {
   const keys = Object.keys(draftFromForm(form));
-  assert.deepEqual(keys.sort(), ["batchMode", "count", "prompt", "providerId", "quality", "seed", "size"]);
+  assert.deepEqual(keys.sort(), [
+    "batchMode",
+    "count",
+    "prompt",
+    "providerId",
+    "quality",
+    "scanCount",
+    "scanMode",
+    "seed",
+    "size",
+  ]);
   assert.ok(!keys.includes("refs"));
   assert.ok(!keys.includes("session_id"));
 });
@@ -19,6 +29,13 @@ test("formFromDraft 补齐默认尺寸 / 质量 / 数量", () => {
   assert.equal(restored.count, 1);
   assert.equal(restored.seed, "");
   assert.equal(restored.batchMode, false);
+  assert.equal(restored.scanMode, false);
+});
+
+test("formFromDraft 恢复扫描设置", () => {
+  const restored = formFromDraft({ prompt: "dog", scanMode: true, scanCount: 8 });
+  assert.equal(restored.scanMode, true);
+  assert.equal(restored.scanCount, 8);
 });
 
 test("formFromDraft 处理空草稿", () => {
@@ -29,4 +46,6 @@ test("draftSignature 同形稳定、改值即变", () => {
   assert.equal(draftSignature(form), draftSignature({ ...form }));
   assert.notEqual(draftSignature(form), draftSignature({ ...form, prompt: "dog" }));
   assert.notEqual(draftSignature(form), draftSignature({ ...form, batchMode: true }));
+  assert.notEqual(draftSignature(form), draftSignature({ ...form, scanMode: true }));
+  assert.notEqual(draftSignature(form), draftSignature({ ...form, scanCount: 8 }));
 });

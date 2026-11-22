@@ -2,11 +2,12 @@
 name: xiic-image-studio
 description: |
   Drive the local xiic-image-studio desktop app to generate images from the command
-  line, including image-to-image generation with reference images. Use this when the
-  user asks to "generate an image", "用本地工作室生图", "以这张图为基础再生成一版",
-  or wants to list the configured image providers. The results land in the same
-  gallery the GUI shows. Do NOT use for cloud image APIs (DALL·E, Midjourney web),
-  for video generation, or for editing pixels of an existing image locally.
+  line, including image-to-image generation with reference images, and to export the
+  gallery's records as JSONL. Use this when the user asks to "generate an image",
+  "用本地工作室生图", "以这张图为基础再生成一版", "把画廊导出成 JSONL", or wants to
+  list the configured image providers. The results land in the same gallery the GUI
+  shows. Do NOT use for cloud image APIs (DALL·E, Midjourney web), for video
+  generation, or for editing pixels of an existing image locally.
 ---
 
 # xiic-image-studio CLI
@@ -28,6 +29,7 @@ description: |
    node scripts/xiic.mjs providers --json            # 先看有哪些 provider
    node scripts/xiic.mjs generate --prompt "一只戴帽子的猫" --json
    node scripts/xiic.mjs generate --prompt "改成夜景" --ref /abs/path/orig.png --json
+   node scripts/xiic.mjs export --out /abs/path/out.jsonl --fav   # 导出画廊记录
    ```
 
    原因：先跑 `providers` 能避免"所有 provider 都没配 Key"这种错误在生成时才暴露。
@@ -66,6 +68,10 @@ Output: 调 `generate --prompt "一只戴帽子的猫" --json`，回报图片绝
 Input: 「把这张图改成夜景」
 Output: 调 `generate --prompt "改成夜景" --ref <该图路径> --json`，回报新图路径；
 原图仍在图库里，新图作为另一条任务记录写入。
+
+Input: 「把我收藏的那批图的提示词导出来」
+Output: 调 `export --out <路径>.jsonl --fav`，回报导出的条数与文件路径。
+导出的文件格式与 GUI「导入批量」一致，可以原样导回去再跑。
 
 ## Windows (win32) platform notes
 

@@ -73,3 +73,45 @@ test("空行与空提示词被丢掉", () => {
   assert.deepEqual(parseBatch("\n\n   \n", "list.txt"), []);
   assert.deepEqual(parseBatch('"",1024x1024', "batch.csv"), []);
 });
+
+test("导出 → 导入闭环：画廊导出的 JSONL 能原样被批量导入读回", () => {
+  // 后端 gallery.rs 的 ExportRow 字段名必须与这里的 BatchItem 对齐，
+  // 否则「导出」只是个存档，「导出→再批量跑」这条闭环就断了。
+  // 后端多带的 model/path/created_at/favorite 会被忽略，这是有意的。
+  const exported = [
+    JSON.stringify({
+      prompt: "一只猫",
+      size: "1024x1024",
+      quality: "high",
+      seed: 42,
+      model: "gpt-image-1",
+      path: "/tmp/a.png",
+      created_at: "2026-01-01T00:00:00+00:00",
+      favorite: false,
+    }),
+    JSON.stringify({
+      prompt: "一只狗",
+      size: null,
+      quality: null,
+      seed: null,
+      model: "gpt-image-1",
+      path: "/tmp/b.png",
+      created_at: "2026-01-02T00:00:00+00:00",
+      favorite: true,
+    }),
+  ].join("\n");
+
+  const items = parseBatch(exported, "gallery.jsonl");
+  assert.equal(items.length, 2);
+  assert.equal(items[0].prompt, "一只猫");
+  assert.equal(items[0].size, "1024x1024");
+  assert.equal(items[0].quality, "high");
+  assert.equal(items[0].seed, "42");
+  // 缺 seed 的行导回来是 undefined，导入侧回落到表单里的种子而不是 0
+  assert.equal(items[1].seed, undefined);
+  // JSON 里的 null 原样带过来；导入侧用 `size || form.size` / `quality ?? form.quality`
+  // 回落，两者都把 null 当「没填」处理
+  assert.equal(items[1].size, null);
+  assert.equal(items[1].quality, null);
+  assert.equal(items[1].n, undefined);
+});
