@@ -1,5 +1,4 @@
 use crate::error::{AppError, AppResult};
-use base64::Engine;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 
@@ -338,23 +337,9 @@ pub async fn tools_video_frames(
     Ok(outs)
 }
 
-/// 本地文件转 base64 data url（供抽帧/转换结果直接作为参考图）
+/// 工具箱输出转 base64 data url（供抽帧/转换结果直接作为参考图）。
+/// 复用 `generate::read_file_b64`：canonicalize + 目录越界校验，只认 tools_dir 内的输出。
 #[tauri::command]
-pub fn tools_file_b64(path: String) -> AppResult<String> {
-    let bytes = std::fs::read(&path)?;
-    let ext = PathBuf::from(&path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("png")
-        .to_lowercase();
-    let mime = match ext.as_str() {
-        "jpg" | "jpeg" => "image/jpeg",
-        "webp" => "image/webp",
-        "gif" => "image/gif",
-        _ => "image/png",
-    };
-    Ok(format!(
-        "data:{mime};base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    ))
+pub fn tools_file_b64(app: AppHandle, path: String) -> AppResult<String> {
+    crate::generate::read_file_b64(&tools_dir(&app)?, &path)
 }

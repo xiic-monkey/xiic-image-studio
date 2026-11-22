@@ -113,7 +113,7 @@ pub fn for_model(protocol: Protocol, model: &str) -> Capabilities {
     }
 }
 
-/// 按能力表裁剪请求：丢弃该协议/模型不支持的参数。
+/// 按能力表裁剪请求：丢弃该协议/模型不支持的参数（含参考图）。
 /// GUI 提交与 CLI 入口都走这里，保证任何一条链路都发不出非法参数。
 pub fn sanitize(caps: &Capabilities, req: &mut GenerateRequest) {
     req.size = req.size.take().filter(|s| caps.sizes.contains(&s.as_str()));
@@ -126,6 +126,9 @@ pub fn sanitize(caps: &Capabilities, req: &mut GenerateRequest) {
     }
     if !caps.mask {
         req.mask = None;
+    }
+    if !caps.refs {
+        req.refs.clear();
     }
 }
 
@@ -271,6 +274,32 @@ mod tests {
         assert!(r.mask.is_some());
         // seed 对 gpt-image-1 仍不支持
         assert!(r.seed.is_none());
+    }
+
+    #[test]
+    fn sanitize_drops_refs_when_unsupported() {
+        let mut r = req();
+        r.refs.push(RefImage {
+            name: "ref.png".into(),
+            mime: "image/png".into(),
+            data: "aGk=".into(),
+        });
+        let caps = for_model(Protocol::OpenAiImages, "dall-e-3");
+        sanitize(&caps, &mut r);
+        assert!(r.refs.is_empty(), "dall-e-3 不支持参考图，应被裁掉");
+    }
+
+    #[test]
+    fn sanitize_keeps_refs_when_supported() {
+        let mut r = req();
+        r.refs.push(RefImage {
+            name: "ref.png".into(),
+            mime: "image/png".into(),
+            data: "aGk=".into(),
+        });
+        let caps = for_model(Protocol::OpenAiImages, "gpt-image-1");
+        sanitize(&caps, &mut r);
+        assert_eq!(r.refs.len(), 1, "gpt-image-1 支持参考图，应保留");
     }
 
     #[test]

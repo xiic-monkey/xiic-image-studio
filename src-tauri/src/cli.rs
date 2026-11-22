@@ -169,8 +169,8 @@ fn ref_from_path(path: &str) -> Result<RefImage> {
     })
 }
 
-/// 参考图能力守卫：`capabilities::sanitize` 只裁 size/quality/seed/mask，**不裁 refs**。
-/// 给 `refs=false` 的协议带图会打到上游不存在的端点并被 400，所以这里必须自己拦。
+/// 参考图能力守卫：`capabilities::sanitize` 也会裁 refs，但这里在 sanitize 之前
+/// 主动报错，避免静默丢图——给 `refs=false` 的协议带图会被上游 400，CLI 要明确提示。
 fn check_refs_supported(
     caps: &crate::capabilities::Capabilities,
     refs: &[RefImage],
@@ -297,7 +297,7 @@ fn generate(args: &[String]) -> Result<()> {
         (provider, key)
     };
 
-    // 与 GUI 同一个裁剪入口；refs 由上面的守卫单独把关
+    // 与 GUI 同一个裁剪入口；上面的守卫先给出 refs 的明确报错，sanitize 兜底裁剪
     let caps = crate::capabilities::for_model(provider.protocol, &provider.model);
     check_refs_supported(&caps, &refs, &provider.name, &provider.model)?;
 

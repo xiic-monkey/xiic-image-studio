@@ -231,8 +231,8 @@ xiic-image-studio/
   便于脚本与管道消费。`--json` 结构为 `task_id/status/count/images[{id,path,thumb_path}]`。
 - 参考图（以图生图）：`--ref <path>` 可重复，最多 4 张（与前端 `MAX_REFS` 一致），
   单张上限 16MB，格式限 png/jpg/jpeg/webp/gif。**CLI 入口按能力表自行拦截**：
-  `caps.refs=false` 的模型（如 dall-e-3、Imagen）带图直接报错，不静默丢弃——
-  见 §12 里 `sanitize()` 不裁 `refs` 那条已知限制。
+  `caps.refs=false` 的模型（如 dall-e-3、Imagen）带图直接报错，不静默丢弃；
+  后端 `sanitize()` 也会兜底裁掉 refs，避免手写请求把图发到不支持的端点。
 - 无头进程与 GUI 是两个进程、写同一张 SQLite：`~/Library/Application Support/com.xiic.image-studio/image-studio.db`
   （无头侧靠 `dirs::data_dir()` + `com.xiic.image-studio` 定位，须与 tauri `app_data_dir()` 一致）。
 - 写库三条硬约束：① 图片必须落在 `<data_dir>/images/<task_id>/`（否则 `image_read_b64` 越界校验拒绝）；
@@ -300,12 +300,10 @@ xiic-image-studio/
 - **批量开关与蒙版涂抹的 GUI 手工验证**：底层纯函数与单测已覆盖（提交语义、蒙版几何换算），
   但 UI 接线还没有人工点过一遍（见 `docs/superpowers/plans/2026-10-31-p0-3-p0-5-fixes.md` 里
   仍未勾选的两步）。
-- **`sanitize()` 不裁 `refs`**：能力表标 `refs=false` 的协议/模型（如 dall-e-3）前端控件会收敛，
-  但后端 `sanitize` 目前只裁数值/尺寸/质量/seed/mask，不裁参考图本体。
-  经 CLI 或手写请求传参考图时，适配器仍可能走 `/v1/images/edits` 而上游并不支持。
-  CLI 入口按能力表自行拦截（`caps.refs=false` 且带 `--ref` 直接报错），GUI 侧暂未拦。
-- **`tools_file_b64` 可读任意路径**：工具箱该命令没做 `read_file_b64` 那样的
-  `canonicalize()` + 目录越界校验，仅在本机单用户场景可接受；做多用户/分发前必须收紧。
+- **两处历史不一致已收紧**：`sanitize()` 现在也裁 `refs`（GUI 手写请求不再能把图发到
+  `refs=false` 的端点；CLI 仍先显式报错再走裁剪）；`tools_file_b64` 改为复用
+  `generate::read_file_b64`，带 `canonicalize()` + 目录越界校验，只认 `app_data/images/tools`
+  内的工具箱输出，不再能读任意路径。
 - **前端无 ESLint / Prettier 配置**：目前靠 TypeScript strict + `noUnusedLocals` +
   `node --test` 兜底；`react-hooks/exhaustive-deps` 一类规则还没纳入检查。
 - **未做运行时冒烟**：GUI（提交→DB `session_id`、删会话置 NULL、重试保留 seed、MJ U/V 进度、
