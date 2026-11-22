@@ -21,6 +21,18 @@ pub enum Protocol {
     /// 阿里云百炼万相: POST {base}/api/v1/services/aigc/text2image/image-synthesis + 轮询任务
     #[serde(rename = "dashscope")]
     DashScope,
+    /// Stability AI: POST {base}/v2beta/stable-image/generate/{model}（multipart，尺寸是画面比例）
+    #[serde(rename = "stability")]
+    Stability,
+    /// Ideogram: POST {base}/v1/{model}/generate（Api-Key 头，尺寸是画面比例）
+    #[serde(rename = "ideogram")]
+    Ideogram,
+    /// Black Forest Labs FLUX: POST {base}/v1/{model} + 轮询 polling_url（x-key 头）
+    #[serde(rename = "flux_bfl")]
+    FluxBfl,
+    /// MiniMax 图像: POST {base}/v1/wand/minimax-image/generation（+ /edits 走参考图）
+    #[serde(rename = "minimax")]
+    Minimax,
 }
 
 impl Protocol {
@@ -32,6 +44,10 @@ impl Protocol {
             Protocol::MidjourneyProxy => "midjourney_proxy",
             Protocol::VolcengineArk => "volcengine_ark",
             Protocol::DashScope => "dashscope",
+            Protocol::Stability => "stability",
+            Protocol::Ideogram => "ideogram",
+            Protocol::FluxBfl => "flux_bfl",
+            Protocol::Minimax => "minimax",
         }
     }
 
@@ -43,6 +59,10 @@ impl Protocol {
             "midjourney_proxy" => Some(Protocol::MidjourneyProxy),
             "volcengine_ark" => Some(Protocol::VolcengineArk),
             "dashscope" => Some(Protocol::DashScope),
+            "stability" => Some(Protocol::Stability),
+            "ideogram" => Some(Protocol::Ideogram),
+            "flux_bfl" => Some(Protocol::FluxBfl),
+            "minimax" => Some(Protocol::Minimax),
             _ => None,
         }
     }
@@ -55,6 +75,10 @@ impl Protocol {
             Protocol::MidjourneyProxy => "https://mj.example.com",
             Protocol::VolcengineArk => "https://ark.cn-beijing.volces.com",
             Protocol::DashScope => "https://dashscope.aliyuncs.com",
+            Protocol::Stability => "https://api.stability.ai",
+            Protocol::Ideogram => "https://api.ideogram.ai",
+            Protocol::FluxBfl => "https://api.bfl.ai",
+            Protocol::Minimax => "https://tokenhub.tencentmaas.com",
         }
     }
 }

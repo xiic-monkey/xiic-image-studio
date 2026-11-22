@@ -48,7 +48,7 @@ ProviderConfig {
 }
 ```
 
-六套协议适配器（对标 mj-studio，覆盖中转站全部主流形态）：
+十套协议适配器（对标 mj-studio，覆盖中转站全部主流形态）：
 
 | 协议 | 端点 | 典型模型 |
 |---|---|---|
@@ -58,6 +58,10 @@ ProviderConfig {
 | **MidjourneyProxy** | `/mj/submit/imagine`、`/mj/task/{id}/fetch`（轮询） | midjourney 系（含垫图、U/V 操作） |
 | **VolcengineArk** | `POST {base}/api/v3/images/generations`（同步，OpenAI 兼容） | 豆包 Seedream 4/5、即梦；国内直连免梯子 |
 | **DashScope** | `POST {base}/api/v1/services/aigc/text2image/image-synthesis` + `GET /api/v1/tasks/{id}`（异步轮询） | 通义万相 wan2.x；国内直连 |
+| **Stability** | `POST {base}/v2beta/stable-image/generate/{model}`（multipart，Accept 头切换字节/JSON） | Stable Image Core/Ultra、SD3.5；尺寸是画面比例，seed 是标准参数 |
+| **Ideogram** | `POST {base}/v1/{model}/generate`（Api-Key 头，提示词字段叫 text_prompt） | Ideogram 4/3；文字排版最强；模型名在路径里 |
+| **FluxBfl** | `POST {base}/v1/{model}` + 轮询 `polling_url`（x-key 头，宽高分开传） | FLUX.2 pro/max/flex/klein；结果 URL 十分钟过期 |
+| **Minimax** | `POST {base}/v1/wand/minimax-image/generation`，带参考图改走 `/edits` | MiniMax H3-Image；国内可用，支持多图参考编辑 |
 
 辅助能力：
 - **模型发现**：拉 `/v1/models`，自动筛出疑似图像模型并猜协议（借鉴 image-studio）
@@ -136,12 +140,12 @@ ProviderConfig {
 └──────────────┬──────────────────────────────────┘
                │ Tauri IPC (invoke / event)
 ┌─ Rust 核心 ──┴──────────────────────────────────┐
-│ provider 模块   六套协议适配器 + 模型发现        │
+│ provider 模块   十套协议适配器 + 模型发现        │
 │ generate 模块                                    │
 │   ├─ pipeline.rs  ← 唯一编排层（prepare_task /   │
 │   │                 execute / spawn_task /       │
 │   │                 run_task_headless）           │
-│   ├─ adapters.rs  六协议 + MJ action 出图        │
+│   ├─ adapters.rs  十协议 + MJ action 出图        │
 │   └─ mod.rs       run_one_core（唯一出图落库叶子）│
 │ storage 模块    rusqlite (任务/会话/图片元数据)  │
 │ media 模块      image 缩略图 ｜ ffmpeg sidecar  │
@@ -217,10 +221,10 @@ meta            (key, value)  -- 迁移标记（provider_models_migrated）
 xiic-image-studio/
 ├── src-tauri/src/
 │   ├── lib.rs / main.rs           # tauri 入口、命令注册、窗口上屏/跨 Space
-│   ├── provider/{client,commands,db,mod,types}.rs   # 六协议连接 + 模型发现 + 测试
+│   ├── provider/{client,commands,db,mod,types}.rs   # 十协议连接 + 模型发现 + 测试
 │   ├── model/{commands,db,mod,types}.rs            # 模型实体 + 供应商×模型关联（多对多）
 │   ├── generate/{adapters,client,commands,mod,types,pipeline}.rs
-│   │       # pipeline = 唯一编排层；mod = 底层原语；adapters = 六协议 + MJ action
+│   │       # pipeline = 唯一编排层；mod = 底层原语；adapters = 十协议 + MJ action
 │   ├── cli.rs                     # generate / export / providers 无头模式
 │   ├── media.rs                   # ffmpeg sidecar + 缩略图
 │   ├── crypto.rs                  # AES-256-GCM 本地密钥
@@ -345,10 +349,17 @@ xiic-image-studio/
 - **供应商 × 模型多对多**：已做。模型是一等实体、协议归模型，关联表自由组合；
   生成请求带 `model_id`，GUI/CLI 共用 `model::db::resolve`；旧库自动迁移。
   已在此基础上新增两种协议（VolcengineArk / DashScope），即"加协议 = 加枚举 + 适配器 + 能力表一行"。
-- **供应商模板**：前端内置 6 个常用供应商模板（OpenAI / OpenRouter / SiliconFlow / Gemini /
-  火山方舟 / 阿里百炼），一键填好名称、baseUrl、协议与常用模型，Key 仍需自填。
+- **供应商模板**：前端内置 12 个常用供应商模板（OpenAI / OpenRouter / SiliconFlow / Gemini /
+  火山方舟 / 阿里百炼 / 百炼 OpenAI 兼容模式 / Stability / Ideogram / BFL FLUX / MiniMax / Recraft），
+  一键填好名称、baseUrl、协议与常用模型，Key 仍需自填。
 - **模型级能力覆写**：模型库每行可展开「能力」，用 JSON 覆写该模型的尺寸/质量/seed 等取值，
   给非标准中转站用。覆写优先于内置规则表；非法 JSON 保存时直接报错。
+- **模型版本策略**：同一模型家族只登记**最新两版**（如 gpt-image-2.6 / 2.5、Seedream 5.5 / 5.0、
+  Wan 2.7 / 2.6、Qwen-Image 3.0 / 2.1）。能力表按模型名前缀匹配，同协议下新版本自动继承，
+  不用为每个版本单独写规则；更老的版本除复现历史任务外没有保留价值。
+- **走兼容模式而非专用协议的模型**：Recraft 与 Qwen-Image 都有 OpenAI 兼容端点，直接用
+  `openai_images` 协议 + 一条能力规则即可，不必各写一个适配器——协议按**请求形状**划分，
+  不是按厂商划分。
 - **ffmpeg webp**：macOS 上 brew 版 ffmpeg 默认不带 libwebp，选 webp 会报错；打包用的 sidecar 自带 webp。
 - **seed 兼容性**：是否下发由能力表决定（openai_chat_image / gemini_native 下发，openai_images 不下发）；
   部分中转站无视该字段属正常。新增的 volcengine_ark / dashscope 同样不下发 seed。

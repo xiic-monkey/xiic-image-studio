@@ -98,6 +98,10 @@ pub const ENDPOINT_PREDICT: &str = "predict";
 pub const ENDPOINT_MJ: &str = "mj";
 pub const ENDPOINT_ARK: &str = "ark";
 pub const ENDPOINT_DASHSCOPE: &str = "dashscope";
+pub const ENDPOINT_STABILITY: &str = "stability";
+pub const ENDPOINT_IDEOGRAM: &str = "ideogram";
+pub const ENDPOINT_FLUX: &str = "flux";
+pub const ENDPOINT_MINIMAX: &str = "minimax";
 
 const GPT_IMAGE_SIZES: &[&str] = &["1024x1024", "1536x1024", "1024x1536"];
 const DALL_E3_SIZES: &[&str] = &["1024x1024", "1792x1024", "1024x1792"];
@@ -107,6 +111,33 @@ const DALL_E3_QUALITY: &[&str] = &["standard", "hd"];
 const GEMINI_RATIOS: &[&str] = &["1:1", "3:4", "4:3", "9:16", "16:9"];
 /// 火山方舟 Seedream 用档位而非精确像素（也支持精确宽高，值域宽，这里给常用档）
 const ARK_SIZES: &[&str] = &["1K", "1.5K", "2K", "auto"];
+/// Stability 的尺寸是画面比例（它按比例给固定像素预算，不接受精确像素）
+const STABILITY_RATIOS: &[&str] = &[
+    "1:1", "16:9", "21:9", "9:16", "9:21", "2:3", "3:2", "4:5", "5:4",
+];
+/// Ideogram 同样只收画面比例
+const IDEOGRAM_RATIOS: &[&str] = &["1:1", "2:3", "3:2", "4:3", "3:4", "16:9", "9:16", "21:9"];
+/// Ideogram 的渲染速度三档（走 quality 字段下发为 rendering_speed）
+const IDEOGRAM_SPEEDS: &[&str] = &["TURBO", "BALANCED", "QUALITY"];
+/// FLUX 的宽高必须是 16 的倍数、最大 4MP
+const FLUX_SIZES: &[&str] = &[
+    "1024x1024",
+    "1280x768",
+    "768x1280",
+    "1536x864",
+    "864x1536",
+    "1920x1080",
+    "1080x1920",
+];
+/// MiniMax 的 size 是「宽x高」，比例另走 aspect_ratio
+const MINIMAX_SIZES: &[&str] = &[
+    "1024x1024",
+    "1024x768",
+    "768x1024",
+    "1280x720",
+    "720x1280",
+    "1440x1440",
+];
 /// 百炼万相的尺寸用「宽*高」星号格式
 const DASHSCOPE_SIZES: &[&str] = &[
     "1024*1024",
@@ -202,6 +233,57 @@ static MODEL_RULES: &[ModelRule] = &[
         endpoint: Some(ENDPOINT_PREDICT),
         ..ModelRule::none()
     },
+    // Recraft 虽然兼容 OpenAI Images 的请求形状，但没有 quality，
+    // 种子字段叫 random_seed 且我们这条链路不下发种子，所以单独一条。
+    ModelRule {
+        protocol: Protocol::OpenAiImages,
+        prefix: "recraftv",
+        quality: Some(&[]),
+        seed: Some(false),
+        ..ModelRule::none()
+    },
+    // Recraft V4 的尺寸只有 1K 方图与横竖构图，比 OpenAI 的表窄
+    ModelRule {
+        protocol: Protocol::OpenAiImages,
+        prefix: "recraftv4",
+        sizes: Some(&["1024x1024", "1536x1024", "1024x1536"]),
+        ..ModelRule::none()
+    },
+    // Stability 的 SD3.5 系列只支持比例，不支持 stable-image 的额外参数
+    ModelRule {
+        protocol: Protocol::Stability,
+        prefix: "sd3",
+        ..ModelRule::none()
+    },
+    // Ideogram 3 是上一代，比例表与 4.0 相同但没有 rendering_speed 之外的变化
+    ModelRule {
+        protocol: Protocol::Ideogram,
+        prefix: "ideogram-v3",
+        ..ModelRule::none()
+    },
+    // FLUX 的 klein 系列尺寸上限更低
+    ModelRule {
+        protocol: Protocol::FluxBfl,
+        prefix: "flux-2-klein",
+        sizes: Some(&["1024x1024", "1280x768", "768x1280"]),
+        ..ModelRule::none()
+    },
+    // Qwen-Image 走 OpenAI 兼容模式时没有 quality，尺寸是「宽x高」
+    ModelRule {
+        protocol: Protocol::OpenAiImages,
+        prefix: "qwen-image",
+        quality: Some(&[]),
+        seed: Some(false),
+        ..ModelRule::none()
+    },
+    // Qwen-Image 在 DashScope 原生协议下同样没有 quality；端点分流由适配器按模型名处理
+    ModelRule {
+        protocol: Protocol::DashScope,
+        prefix: "qwen-image",
+        quality: Some(&[]),
+        seed: Some(false),
+        ..ModelRule::none()
+    },
 ];
 
 /// 协议默认能力。新增协议时在这里加一个分支。
@@ -253,6 +335,46 @@ fn protocol_defaults(protocol: Protocol) -> CapsSpec {
             mask: false,
             endpoint: ENDPOINT_ARK,
             size_label: "分辨率",
+        },
+        Protocol::Stability => CapsSpec {
+            sizes: STABILITY_RATIOS,
+            quality: &[],
+            // Stability 的 seed 是标准参数（0..4294967294），会原样下发
+            seed: true,
+            refs: true,
+            mask: false,
+            endpoint: ENDPOINT_STABILITY,
+            size_label: "画面比例",
+        },
+        Protocol::Ideogram => CapsSpec {
+            sizes: IDEOGRAM_RATIOS,
+            // Ideogram 的 quality 承载 rendering_speed：三档渲染速度
+            quality: IDEOGRAM_SPEEDS,
+            seed: false,
+            // Ideogram 4.0 只有文生图，没有图生图入口
+            refs: false,
+            mask: false,
+            endpoint: ENDPOINT_IDEOGRAM,
+            size_label: "画面比例",
+        },
+        Protocol::FluxBfl => CapsSpec {
+            sizes: FLUX_SIZES,
+            quality: &[],
+            seed: false,
+            refs: true,
+            mask: false,
+            endpoint: ENDPOINT_FLUX,
+            size_label: "尺寸",
+        },
+        Protocol::Minimax => CapsSpec {
+            sizes: MINIMAX_SIZES,
+            quality: &[],
+            seed: false,
+            // 编辑端点 /edits 收参考图（1~16 张）
+            refs: true,
+            mask: false,
+            endpoint: ENDPOINT_MINIMAX,
+            size_label: "尺寸",
         },
         Protocol::DashScope => CapsSpec {
             sizes: DASHSCOPE_SIZES,
@@ -456,6 +578,80 @@ mod tests {
         assert!(!c.seed);
         // image-synthesis 是文生图端点，不收参考图
         assert!(!c.refs && !c.mask);
+    }
+
+    #[test]
+    fn gpt_image_versions_share_one_rule() {
+        // 同一个模型家族只写一条前缀规则，新版本自动覆盖
+        for v in [
+            "gpt-image-2.6",
+            "gpt-image-2.5",
+            "gpt-image-2",
+            "gpt-image-1",
+        ] {
+            let c = for_model(Protocol::OpenAiImages, v);
+            assert!(c.mask && c.refs, "{v} 应支持参考图与蒙版");
+            assert!(!c.seed, "{v} 不下发 seed");
+            assert!(c.allows_size("1536x1024"), "{v} 应支持该尺寸");
+        }
+    }
+
+    #[test]
+    fn recraft_has_no_quality_but_keeps_sizes() {
+        let c = for_model(Protocol::OpenAiImages, "recraftv4_1");
+        assert!(c.quality.is_empty(), "Recraft 没有 quality");
+        assert!(!c.seed, "Recraft 的种子字段叫 random_seed，这条链路不下发");
+        assert!(c.allows_size("1024x1024"));
+    }
+
+    #[test]
+    fn qwen_image_rules_apply_to_both_protocols() {
+        let via_openai = for_model(Protocol::OpenAiImages, "qwen-image-3.0-pro");
+        assert!(via_openai.quality.is_empty(), "Qwen 兼容模式没有 quality");
+        assert!(via_openai.allows_size("1024x1024"));
+        let via_dashscope = for_model(Protocol::DashScope, "qwen-image-3.0-pro");
+        assert!(via_dashscope.quality.is_empty());
+        assert!(!via_dashscope.seed);
+        assert!(
+            via_dashscope.allows_size("1024*1024"),
+            "百炼原生端点用星号尺寸"
+        );
+    }
+
+    #[test]
+    fn minimax_supports_reference_images() {
+        let c = for_model(Protocol::Minimax, "minimax-image-h3");
+        assert!(c.refs, "MiniMax 有 /edits 端点收参考图");
+        assert!(!c.mask);
+        assert_eq!(c.endpoint, "minimax");
+    }
+
+    #[test]
+    fn ideogram_speed_tiers_ride_on_quality() {
+        let c = for_model(Protocol::Ideogram, "ideogram-v4");
+        assert!(c.allows_quality("TURBO"));
+        assert!(c.allows_quality("BALANCED"));
+        assert!(c.allows_quality("QUALITY"));
+        assert!(c.allows_size("16:9"));
+        assert!(!c.refs, "Ideogram 4.0 只有文生图");
+    }
+
+    #[test]
+    fn stability_supports_seed_and_ratios() {
+        let c = for_model(Protocol::Stability, "stable-image-ultra");
+        assert!(c.seed, "Stability 的 seed 是标准参数");
+        assert!(c.allows_size("16:9"));
+        assert!(!c.allows_size("1024x1024"), "Stability 只收比例");
+        assert!(c.refs, "generate 端点收 image 文件做图生图");
+    }
+
+    #[test]
+    fn flux_klein_has_smaller_size_table() {
+        let pro = for_model(Protocol::FluxBfl, "flux-2-pro");
+        assert!(pro.allows_size("1920x1080"));
+        let klein = for_model(Protocol::FluxBfl, "flux-2-klein-9b");
+        assert!(!klein.allows_size("1920x1080"));
+        assert!(klein.allows_size("1024x1024"));
     }
 
     #[test]

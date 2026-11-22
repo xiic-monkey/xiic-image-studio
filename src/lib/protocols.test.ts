@@ -27,14 +27,18 @@ describe("协议常量", () => {
     }
   });
 
-  it("协议列表覆盖后端实现的六种协议", () => {
+  it("协议列表覆盖后端实现的十种协议", () => {
     // 新增后端协议时忘了加前端标签，这里会先炸
     assert.deepEqual([...ALL].sort(), [
       "dashscope",
+      "flux_bfl",
       "gemini_native",
+      "ideogram",
       "midjourney_proxy",
+      "minimax",
       "openai_chat_image",
       "openai_images",
+      "stability",
       "volcengine_ark",
     ]);
   });

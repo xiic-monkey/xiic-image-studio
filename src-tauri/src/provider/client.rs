@@ -88,6 +88,10 @@ async fn probe(draft: &ProviderDraft, key: &str) -> AppResult<(u16, String)> {
         Protocol::MidjourneyProxy => (join_url(&base, "/mj/task/list"), true),
         Protocol::VolcengineArk => (join_with_prefix(&base, "/api/v3", "/models"), true),
         Protocol::DashScope => (join_with_prefix(&base, "/api/v1", "/models"), true),
+        Protocol::Stability => (join_with_prefix(&base, "/v2beta", "/models"), true),
+        Protocol::Ideogram => (join_url(&base, "/v1/models"), true),
+        Protocol::FluxBfl => (join_url(&base, "/v1/models"), true),
+        Protocol::Minimax => (join_url(&base, "/v1/models"), true),
     };
 
     let mut rb = client.get(&url);
@@ -95,6 +99,12 @@ async fn probe(draft: &ProviderDraft, key: &str) -> AppResult<(u16, String)> {
     match draft.protocol {
         Protocol::GeminiNative => {
             rb = rb.header("x-goog-api-key", key);
+        }
+        Protocol::Ideogram => {
+            rb = rb.header("Api-Key", key);
+        }
+        Protocol::FluxBfl => {
+            rb = rb.header("x-key", key);
         }
         _ if authed => {
             rb = openai_auth(rb, key);
@@ -276,6 +286,40 @@ pub async fn discover_models(draft: &ProviderDraft, key: &str) -> AppResult<Disc
                 message: format!("发现 {n} 个模型（含非生图模型，请自行挑选）"),
             })
         }
+        // Stability 的模型名固定（部分部署的 /v2beta/models 不存在，直接给名单）
+        Protocol::Stability => Ok(DiscoveredModels {
+            models: vec![
+                "stable-image-ultra".into(),
+                "stable-image-core".into(),
+                "sd3.5-large".into(),
+                "sd3.5-large-turbo".into(),
+                "sd3.5-medium".into(),
+                "sd3.5-flash".into(),
+            ],
+            message: "Stability 常用模型名".into(),
+        }),
+        // Ideogram / FLUX / MiniMax 的模型名固定在请求路径里，只能手填
+        Protocol::Ideogram => Ok(DiscoveredModels {
+            models: vec!["ideogram-v4".into(), "ideogram-v3".into()],
+            message: "Ideogram 固定模型名（模型名在请求路径里）".into(),
+        }),
+        Protocol::FluxBfl => Ok(DiscoveredModels {
+            models: vec![
+                "flux-2-max".into(),
+                "flux-2-pro".into(),
+                "flux-2-flex".into(),
+                "flux-2-klein-9b".into(),
+                "flux-2-klein-4b".into(),
+            ],
+            message: "FLUX 固定模型名（模型名在请求路径里）".into(),
+        }),
+        Protocol::Minimax => Ok(DiscoveredModels {
+            models: vec![
+                "minimax-image-h3".into(),
+                "minimax-image-h3-highspeed".into(),
+            ],
+            message: "MiniMax 图像固定模型名".into(),
+        }),
     }
 }
 

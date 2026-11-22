@@ -494,22 +494,46 @@ const DASHSCOPE_POLL_TIMES: usize = 150;
 pub async fn dashscope(ctx: &GenCtx) -> AppResult<ImageOut> {
     let caps = &ctx.caps;
     let client = http_client();
-    let url = join_with_prefix(
-        &ctx.base_url,
-        "/api/v1",
-        "/services/aigc/text2image/image-synthesis",
-    );
+    // 百炼有两套图像端点，形状不同：
+    // - wan2.x 走 image-synthesis，结果在 output.results[].url
+    // - qwen-image-3.0 走 multimodal-generation，结果在 output.choices[].message.content[].image
+    let is_qwen3 = ctx.model.starts_with("qwen-image-3") || ctx.model.starts_with("qwen3-image");
+    let url = if is_qwen3 {
+        join_with_prefix(
+            &ctx.base_url,
+            "/api/v1",
+            "/services/aigc/multimodal-generation/generation",
+        )
+    } else {
+        join_with_prefix(
+            &ctx.base_url,
+            "/api/v1",
+            "/services/aigc/text2image/image-synthesis",
+        )
+    };
 
     let mut parameters = serde_json::Map::new();
     if let Some(size) = allowed(&caps.sizes, &ctx.size) {
         parameters.insert("size".into(), json!(size));
     }
     parameters.insert("n".into(), json!(1));
-    let body = json!({
-        "model": ctx.model,
-        "input": {"prompt": ctx.prompt},
-        "parameters": serde_json::Value::Object(parameters),
-    });
+    let body = if is_qwen3 {
+        let mut content: Vec<Value> = vec![json!({"text": ctx.prompt})];
+        for r in &ctx.refs {
+            content.push(json!({"image": data_url(&r.mime, &r.data)}));
+        }
+        json!({
+            "model": ctx.model,
+            "input": {"messages": [{"role": "user", "content": content}]},
+            "parameters": serde_json::Value::Object(parameters),
+        })
+    } else {
+        json!({
+            "model": ctx.model,
+            "input": {"prompt": ctx.prompt},
+            "parameters": serde_json::Value::Object(parameters),
+        })
+    };
 
     let rb = apply_headers(
         client
@@ -536,6 +560,26 @@ pub async fn dashscope(ctx: &GenCtx) -> AppResult<ImageOut> {
     poll_dashscope_task(&client, &ctx.base_url, task_id, ctx).await
 }
 
+/// 百炼两种端点的图片位置不一样，都试一遍。
+fn dashscope_image_url(output: &Value) -> Option<&str> {
+    output["results"]
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|r| r.get("url"))
+        .and_then(|u| u.as_str())
+        .or_else(|| {
+            output["choices"]
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|c| c["message"]["content"].as_array())
+                .and_then(|items| {
+                    items
+                        .iter()
+                        .find_map(|it| it.get("image").and_then(|v| v.as_str()))
+                })
+        })
+}
+
 async fn poll_dashscope_task(
     client: &reqwest::Client,
     base_url: &str,
@@ -555,11 +599,7 @@ async fn poll_dashscope_task(
         let output = &status["output"];
         match output["task_status"].as_str().unwrap_or("") {
             "SUCCEEDED" => {
-                let img_url = output["results"]
-                    .as_array()
-                    .and_then(|a| a.first())
-                    .and_then(|r| r.get("url"))
-                    .and_then(|u| u.as_str())
+                let img_url = dashscope_image_url(output)
                     .ok_or_else(|| AppError::Fetch("百炼任务成功但无图片 URL".into()))?;
                 return download_url(img_url).await;
             }
@@ -574,6 +614,281 @@ async fn poll_dashscope_task(
         }
     }
     Err(AppError::General("百炼任务超时（5 分钟）".into()))
+}
+
+// ---------- Stability AI ----------
+
+/// Stability AI：POST {base}/v2beta/stable-image/generate/{model}
+/// 请求是 multipart/form-data（不是 JSON），尺寸走画面比例，种子是标准参数。
+/// 响应头 Accept: application/json 时返回 {image: base64, seed, finish_reason}。
+pub async fn stability(ctx: &GenCtx) -> AppResult<ImageOut> {
+    let caps = &ctx.caps;
+    let client = image_client();
+    let url = join_with_prefix(
+        &ctx.base_url,
+        "/v2beta",
+        &format!("/stable-image/generate/{}", ctx.model),
+    );
+
+    // Stability 的 multipart 必须带一个 files 字段，哪怕内容为空
+    let mut form = reqwest::multipart::Form::new()
+        .text("prompt", ctx.prompt.clone())
+        .part(
+            "none",
+            reqwest::multipart::Part::bytes(Vec::new())
+                .file_name("none")
+                .mime_str("text/plain")?,
+        );
+    if let Some(size) = allowed(&caps.sizes, &ctx.size) {
+        form = form.text("aspect_ratio", size);
+    }
+    if caps.seed {
+        if let Some(s) = ctx.seed {
+            // Stability 的种子是 32 位无符号
+            if s <= u32::MAX as u64 {
+                form = form.text("seed", s.to_string());
+            }
+        }
+    }
+    if let Some(r) = ctx.refs.first() {
+        let file = reqwest::multipart::Part::bytes(b64_decode(&r.data)?)
+            .file_name(if r.name.is_empty() {
+                "ref.png".into()
+            } else {
+                r.name.clone()
+            })
+            .mime_str(&r.mime)?;
+        form = form.part("image", file);
+    }
+
+    let rb = apply_headers(
+        client
+            .post(&url)
+            .bearer_auth(&ctx.key)
+            .header("accept", "application/json"),
+        &ctx.custom_headers,
+    );
+    let resp_body: Value = send_json(rb.multipart(form)).await?;
+
+    // Stability 的错误体是 {name, errors[]}，不是 OpenAI 那种 error 对象
+    if let Some(errs) = resp_body.get("errors").and_then(|e| e.as_array()) {
+        let msg = errs
+            .iter()
+            .filter_map(|e| e.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(AppError::Upstream(format!(
+            "上游报错: {}",
+            if msg.is_empty() {
+                resp_body["name"].as_str().unwrap_or("未知错误").to_string()
+            } else {
+                msg
+            }
+        )));
+    }
+    // 内容审核命中时依然返回 200，但图是审核占位图，必须当失败处理
+    let finish = resp_body["finish_reason"].as_str().unwrap_or("SUCCESS");
+    if finish != "SUCCESS" {
+        return Err(AppError::Upstream(format!(
+            "上游未出图（finish_reason={finish}）：多半是内容审核未通过"
+        )));
+    }
+    let b64 = resp_body["image"]
+        .as_str()
+        .ok_or_else(|| AppError::Fetch("Stability 响应中无 image 字段".into()))?;
+    Ok(ImageOut::new(b64_decode(b64)?, "image/png"))
+}
+
+// ---------- Ideogram ----------
+
+/// Ideogram：POST {base}/v1/{model}/generate
+/// 鉴权用 Api-Key 头（不是 Bearer），提示词字段叫 text_prompt，尺寸是画面比例。
+pub async fn ideogram(ctx: &GenCtx) -> AppResult<ImageOut> {
+    let caps = &ctx.caps;
+    let client = image_client();
+    let url = join_url(&ctx.base_url, &format!("/v1/{}/generate", ctx.model));
+
+    let mut body = json!({ "text_prompt": ctx.prompt });
+    if let Some(size) = allowed(&caps.sizes, &ctx.size) {
+        body["aspect_ratio"] = json!(size);
+    }
+    // quality 在这里承载 rendering_speed：Ideogram 的三档是 TURBO/BALANCED/QUALITY
+    if let Some(q) = allowed(&caps.quality, &ctx.quality) {
+        body["rendering_speed"] = json!(q);
+    }
+
+    let rb = apply_headers(
+        client.post(&url).header("Api-Key", &ctx.key),
+        &ctx.custom_headers,
+    );
+    let resp_body: Value = send_json(rb.json(&body)).await?;
+
+    if let Some(err) = resp_body.get("error") {
+        return Err(AppError::Upstream(format!(
+            "上游报错: {}",
+            err["message"].as_str().unwrap_or(&err.to_string())
+        )));
+    }
+    let first = resp_body["data"]
+        .as_array()
+        .and_then(|a| a.first())
+        .ok_or_else(|| AppError::Fetch("上游返回为空".into()))?;
+    image_from_data(first).await
+}
+
+// ---------- Black Forest Labs FLUX ----------
+
+#[cfg(test)]
+const FLUX_POLL_INTERVAL: Duration = Duration::ZERO;
+#[cfg(not(test))]
+const FLUX_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const FLUX_POLL_TIMES: usize = 150;
+
+/// FLUX：POST {base}/v1/{model} 提交任务 → 轮询 polling_url → result.sample 是图。
+/// 鉴权用 x-key 头，宽高分开传（且必须是 16 的倍数），结果 URL 十分钟过期。
+pub async fn flux_bfl(ctx: &GenCtx) -> AppResult<ImageOut> {
+    let caps = &ctx.caps;
+    let client = http_client();
+    let url = join_url(&ctx.base_url, &format!("/v1/{}", ctx.model));
+
+    let mut body = json!({ "prompt": ctx.prompt });
+    if let Some(size) = allowed(&caps.sizes, &ctx.size) {
+        if let Some((w, h)) = size.split_once('x') {
+            if let (Ok(w), Ok(h)) = (w.parse::<u32>(), h.parse::<u32>()) {
+                body["width"] = json!(w);
+                body["height"] = json!(h);
+            }
+        }
+    }
+    // 参考图按 input_image / input_image_2 ... 编号下发
+    for (i, r) in ctx.refs.iter().enumerate() {
+        let key = if i == 0 {
+            "input_image".to_string()
+        } else {
+            format!("input_image_{}", i + 1)
+        };
+        body[key] = json!(data_url(&r.mime, &r.data));
+    }
+
+    let rb = apply_headers(
+        client.post(&url).header("x-key", &ctx.key),
+        &ctx.custom_headers,
+    );
+    let resp: Value = send_json(rb.json(&body)).await?;
+
+    if let Some(err) = resp.get("error") {
+        return Err(AppError::Upstream(format!(
+            "上游报错: {}",
+            err["message"].as_str().unwrap_or(&err.to_string())
+        )));
+    }
+    let polling_url = resp["polling_url"]
+        .as_str()
+        .ok_or_else(|| AppError::General("FLUX 未返回 polling_url".into()))?;
+    // 上游给绝对地址就用绝对地址；给相对地址就按 base 拼（部分中转会这么返回）
+    let polling_url = if polling_url.starts_with("http") {
+        polling_url.to_string()
+    } else {
+        join_url(&ctx.base_url, polling_url)
+    };
+
+    poll_flux_task(&client, &polling_url, ctx).await
+}
+
+async fn poll_flux_task(
+    client: &reqwest::Client,
+    polling_url: &str,
+    ctx: &GenCtx,
+) -> AppResult<ImageOut> {
+    for _ in 0..FLUX_POLL_TIMES {
+        tokio::time::sleep(FLUX_POLL_INTERVAL).await;
+        if let Some(flag) = &ctx.cancel {
+            if flag.load(Ordering::Relaxed) {
+                return Err(AppError::General("已取消".into()));
+            }
+        }
+        let rb = apply_headers(
+            client.get(polling_url).header("x-key", &ctx.key),
+            &ctx.custom_headers,
+        );
+        let status: Value = send_json(rb).await?;
+        match status["status"].as_str().unwrap_or("") {
+            "Ready" => {
+                let sample = status["result"]["sample"]
+                    .as_str()
+                    .ok_or_else(|| AppError::Fetch("FLUX 就绪但无 result.sample".into()))?;
+                return download_url(sample).await;
+            }
+            "Error" | "Failed" => {
+                return Err(AppError::General(format!(
+                    "FLUX 任务失败: {}",
+                    status["error"]["message"].as_str().unwrap_or("未知原因")
+                )));
+            }
+            _ => continue,
+        }
+    }
+    Err(AppError::General("FLUX 任务超时（5 分钟）".into()))
+}
+
+// ---------- MiniMax 图像 ----------
+
+/// MiniMax H3-Image：POST {base}/v1/wand/minimax-image/generation
+/// 带参考图时改走 /edits（images 数组收 {image_url} 或 {url}）。
+/// 同步返回，图片在 data[].url。
+pub async fn minimax(ctx: &GenCtx) -> AppResult<ImageOut> {
+    let caps = &ctx.caps;
+    let client = image_client();
+    let has_refs = !ctx.refs.is_empty();
+    let path = if has_refs {
+        "/v1/wand/minimax-image/edits"
+    } else {
+        "/v1/wand/minimax-image/generation"
+    };
+    let url = join_url(&ctx.base_url, path);
+
+    let mut body = json!({
+        "model": ctx.model,
+        "prompt": ctx.prompt,
+        "n": 1,
+        "response_format": "url",
+    });
+    if let Some(size) = allowed(&caps.sizes, &ctx.size) {
+        body["size"] = json!(size);
+    }
+    if has_refs {
+        body["images"] = json!(ctx
+            .refs
+            .iter()
+            .map(|r| json!({"image_url": data_url(&r.mime, &r.data)}))
+            .collect::<Vec<_>>());
+    }
+
+    let rb = apply_headers(client.post(&url).bearer_auth(&ctx.key), &ctx.custom_headers);
+    let resp_body: Value = send_json(rb.json(&body)).await?;
+
+    if let Some(err) = resp_body.get("error") {
+        return Err(AppError::Upstream(format!(
+            "上游报错: {}",
+            err["message"].as_str().unwrap_or(&err.to_string())
+        )));
+    }
+    // MiniMax 的错误有时在 base_resp
+    if let Some(code) = resp_body["base_resp"]["status_code"].as_i64() {
+        if code != 0 {
+            return Err(AppError::Upstream(format!(
+                "上游报错({code}): {}",
+                resp_body["base_resp"]["status_msg"]
+                    .as_str()
+                    .unwrap_or("未知错误")
+            )));
+        }
+    }
+    let first = resp_body["data"]
+        .as_array()
+        .and_then(|a| a.first())
+        .ok_or_else(|| AppError::Fetch("上游返回为空".into()))?;
+    image_from_data(first).await
 }
 
 // ---------- Midjourney Proxy ----------
@@ -990,6 +1305,180 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("InvalidApiKey"), "实际错误：{msg}");
         assert!(msg.contains("No API-key"), "实际错误：{msg}");
+    }
+
+    #[tokio::test]
+    async fn stability_posts_multipart_with_ratio_and_seed() {
+        let (base, cap) = capture_server(r#"{"image":"aGk=","seed":42,"finish_reason":"SUCCESS"}"#);
+        let mut c = ctx_for(
+            base,
+            "stable-image-ultra",
+            crate::provider::types::Protocol::Stability,
+        );
+        c.size = Some("16:9".into());
+        c.seed = Some(42);
+        let out = super::stability(&c).await.expect("应出图");
+        assert!(!out.bytes.is_empty());
+        let (head, body) = cap.lock().unwrap().clone();
+        assert!(
+            head.starts_with("POST /v2beta/stable-image/generate/stable-image-ultra"),
+            "实际请求行：{head}"
+        );
+        assert!(
+            head.to_lowercase().contains("multipart/form-data"),
+            "Stability 要 multipart：{head}"
+        );
+        assert!(body.contains("aspect_ratio"), "比例应下发：{body}");
+        assert!(body.contains("16:9"), "比例值应下发：{body}");
+        assert!(
+            body.contains("42"),
+            "seed 是 Stability 的标准参数，应下发：{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stability_reports_content_filtered_as_failure() {
+        let (base, _cap) = capture_server(r#"{"image":"aGk=","finish_reason":"CONTENT_FILTERED"}"#);
+        let c = ctx_for(
+            base,
+            "stable-image-ultra",
+            crate::provider::types::Protocol::Stability,
+        );
+        let err = super::stability(&c).await.unwrap_err();
+        assert!(
+            err.to_string().contains("CONTENT_FILTERED"),
+            "审核命中必须当失败，实际：{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ideogram_uses_api_key_header_and_text_prompt() {
+        let (base, cap) = capture_server(r#"{"data":[{"url":"data:image/png;base64,aGk="}]}"#);
+        let mut c = ctx_for(
+            base,
+            "ideogram-v4",
+            crate::provider::types::Protocol::Ideogram,
+        );
+        c.size = Some("16:9".into());
+        c.quality = Some("TURBO".into());
+        let _ = super::ideogram(&c).await;
+        let (head, body) = cap.lock().unwrap().clone();
+        assert!(
+            head.starts_with("POST /v1/ideogram-v4/generate"),
+            "模型名要进路径：{head}"
+        );
+        assert!(
+            head.to_lowercase().contains("api-key:"),
+            "Ideogram 用 Api-Key 头：{head}"
+        );
+        let v: Value = serde_json::from_str(&body).expect("请求体应是 JSON");
+        assert_eq!(v["text_prompt"], "cat", "提示词字段是 text_prompt");
+        assert_eq!(v["aspect_ratio"], "16:9");
+        assert_eq!(
+            v["rendering_speed"], "TURBO",
+            "quality 承载 rendering_speed"
+        );
+    }
+
+    #[tokio::test]
+    async fn flux_submits_task_then_polls_result() {
+        let (base, cap) = capture_server_n(vec![
+            (
+                200,
+                r#"{"id":"job1","polling_url":"/v1/get_result?id=job1"}"#,
+            ),
+            (
+                200,
+                r#"{"status":"Ready","result":{"sample":"data:image/png;base64,aGk="}}"#,
+            ),
+        ]);
+        let mut c = ctx_for(
+            base,
+            "flux-2-pro",
+            crate::provider::types::Protocol::FluxBfl,
+        );
+        c.size = Some("1024x1024".into());
+        let out = super::flux_bfl(&c).await.expect("应出图");
+        assert!(!out.bytes.is_empty());
+        let cap = cap.lock().unwrap();
+        assert!(
+            cap[0].0.starts_with("POST /v1/flux-2-pro"),
+            "模型名要进路径：{}",
+            cap[0].0
+        );
+        assert!(
+            cap[0].0.to_lowercase().contains("x-key:"),
+            "FLUX 用 x-key 头：{}",
+            cap[0].0
+        );
+        let v: Value = serde_json::from_str(&cap[0].1).expect("请求体应是 JSON");
+        assert_eq!(v["width"], 1024);
+        assert_eq!(v["height"], 1024);
+    }
+
+    #[tokio::test]
+    async fn minimax_uses_edits_endpoint_when_reference_present() {
+        let (base, cap) = capture_server(r#"{"data":[{"url":"data:image/png;base64,aGk="}]}"#);
+        let mut c = ctx_for(
+            base,
+            "minimax-image-h3",
+            crate::provider::types::Protocol::Minimax,
+        );
+        c.refs.push(RefImage {
+            name: "ref.png".into(),
+            mime: "image/png".into(),
+            data: "aGk=".into(),
+        });
+        let _ = super::minimax(&c).await;
+        let (head, body) = cap.lock().unwrap().clone();
+        assert!(
+            head.starts_with("POST /v1/wand/minimax-image/edits"),
+            "带参考图要走 edits：{head}"
+        );
+        let v: Value = serde_json::from_str(&body).expect("请求体应是 JSON");
+        assert_eq!(v["model"], "minimax-image-h3");
+        assert!(
+            v["images"][0]["image_url"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("data:image/png;base64,"),
+            "参考图应作为 image_url：{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dashscope_qwen3_uses_multimodal_endpoint() {
+        let (base, cap) = capture_server_n(vec![
+            (
+                200,
+                r#"{"output":{"task_id":"t-9","task_status":"PENDING"}}"#,
+            ),
+            (
+                200,
+                r#"{"output":{"task_status":"SUCCEEDED","choices":[{"message":{"content":[{"image":"data:image/png;base64,aGk="}]}}]}}"#,
+            ),
+        ]);
+        let mut c = ctx_for(
+            base,
+            "qwen-image-3.0-pro",
+            crate::provider::types::Protocol::DashScope,
+        );
+        c.size = Some("1024*1024".into());
+        let out = super::dashscope(&c).await.expect("应出图");
+        assert!(!out.bytes.is_empty());
+        let cap = cap.lock().unwrap();
+        assert!(
+            cap[0]
+                .0
+                .starts_with("POST /api/v1/services/aigc/multimodal-generation/generation"),
+            "Qwen-Image 3.0 走 multimodal 端点：{}",
+            cap[0].0
+        );
+        let v: Value = serde_json::from_str(&cap[0].1).expect("请求体应是 JSON");
+        assert_eq!(
+            v["input"]["messages"][0]["content"][0]["text"], "cat",
+            "提示词在 messages.content[].text"
+        );
     }
 
     #[tokio::test]

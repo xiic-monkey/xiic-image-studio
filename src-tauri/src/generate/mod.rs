@@ -76,6 +76,10 @@ fn dispatch_producer<'a>(
         }
         ImageProducer::Protocol(Protocol::VolcengineArk) => Box::pin(adapters::volcengine_ark(ctx)),
         ImageProducer::Protocol(Protocol::DashScope) => Box::pin(adapters::dashscope(ctx)),
+        ImageProducer::Protocol(Protocol::Stability) => Box::pin(adapters::stability(ctx)),
+        ImageProducer::Protocol(Protocol::Ideogram) => Box::pin(adapters::ideogram(ctx)),
+        ImageProducer::Protocol(Protocol::FluxBfl) => Box::pin(adapters::flux_bfl(ctx)),
+        ImageProducer::Protocol(Protocol::Minimax) => Box::pin(adapters::minimax(ctx)),
         ImageProducer::MjAction {
             mj_task_id,
             command,

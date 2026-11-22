@@ -20,7 +20,8 @@ description: |
 - **参考图路径**（可选）：以图生图时需要；最多 4 张，格式 png/jpg/jpeg/webp/gif，单张 ≤16MB。
 - **用哪个 provider**（可选）：不指定就用第一个配好 API Key 的；用户明确点名时才传 `--provider`。
 - **用哪个 model**（可选）：一家 provider 可挂多个不同协议的模型，不指定用默认模型；用户点名时传 `--model`。
-  协议已覆盖 OpenAI Images、Chat 生图、Gemini 原生、MJ Proxy、火山方舟（豆包 Seedream）、阿里百炼（万相）。
+  协议已覆盖 OpenAI Images、Chat 生图、Gemini 原生、MJ Proxy、火山方舟（豆包 Seedream）、
+  阿里百炼（万相 / Qwen-Image）、Stability AI、Ideogram、Black Forest Labs FLUX、MiniMax 图像。
 
 ## Procedure
 
