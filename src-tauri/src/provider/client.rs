@@ -129,23 +129,22 @@ pub async fn test_connection(draft: &ProviderDraft, key: &str) -> TestResult {
             } else if status == 401 || status == 403 {
                 format!("鉴权失败（HTTP {status}），请检查 API Key")
             } else if status == 404 {
-                if matches!(
-                    draft.protocol,
-                    Protocol::Stability
-                        | Protocol::Ideogram
-                        | Protocol::FluxBfl
-                        | Protocol::Minimax
-                ) {
-                    // 这几个协议没有模型列表端点，404 不代表 Key 或地址配错了
-                    format!(
+                match draft.protocol {
+                    // Stability 的模型名单是内置的，探活打的 /v2beta/models 本就不存在
+                    Protocol::Stability => format!(
                         "该协议不提供模型列表端点（HTTP 404 属正常），请直接发起一次生成来验证配置（当前协议 {}）",
                         draft.protocol.as_str()
-                    )
-                } else {
-                    format!(
+                    ),
+                    // 这三个协议也常用固定模型名，但 404 同样可能是 baseUrl 填错，
+                    // 不能一律说成正常，要让用户真的生成一次才算验证通过。
+                    Protocol::Ideogram | Protocol::FluxBfl | Protocol::Minimax => format!(
+                        "探活端点返回 404：该协议通常不提供模型列表端点，但 baseUrl 与协议不匹配也会 404。请直接发起一次生成来验证配置（当前协议 {}）",
+                        draft.protocol.as_str()
+                    ),
+                    _ => format!(
                         "端点不存在（HTTP 404），请确认 baseUrl 与协议匹配（当前协议 {}）",
                         draft.protocol.as_str()
-                    )
+                    ),
                 }
             } else {
                 let brief = body.chars().take(200).collect::<String>();

@@ -36,7 +36,8 @@ xiic-image-studio generate --prompt "融合这两张" --ref a.png --ref b.png --
 | gemini_native + `imagen-*` | ❌（走 `:predict` 端点） |
 | midjourney_proxy | ✅（`base64Array`） |
 | volcengine_ark | ✅（`image` 字段，最多 10 张） |
-| dashscope | ❌（文生图端点 `image-synthesis` 不收参考图） |
+| dashscope + `wan2.x` | ❌（文生图端点 `image-synthesis` 不收参考图） |
+| dashscope + `qwen-image-3*` / `qwen3-image*` | ✅（同步 multimodal 端点，图放在 content 里） |
 | stability | ✅（multipart 的 `image` 字段） |
 | ideogram | ❌（4.0 只有文生图） |
 | flux_bfl | ✅（`input_image` / `input_image_2`…） |

@@ -186,20 +186,29 @@ pub fn add(conn: &Connection, draft: &ModelDraft) -> AppResult<String> {
             params![id, draft.label.trim()],
         )?;
     }
-    // 能力覆写：空串表示「不覆写」（清掉已有覆写），非空则校验后写入。
-    let raw = draft.capabilities_override.trim();
-    if !raw.is_empty() {
-        // 覆写非法就直接报错：用户以为自己填上了，实际没生效才是最糟的
-        if serde_json::from_str::<crate::capabilities::CapabilityOverride>(raw).is_err() {
-            return Err(AppError::General(
-                "能力覆写不是合法 JSON，字段可用：sizes / quality / seed / refs / mask / endpoint / size_label"
-                    .into(),
-            ));
+    // 能力覆写：None = 前端没提这件事（保持原值）；Some("") = 显式清除；
+    // 非空则校验后写入。区分两者才能让「留空=恢复内置推导」真的生效。
+    match draft.capabilities_override.as_deref().map(str::trim) {
+        Some(raw) if !raw.is_empty() => {
+            // 覆写非法就直接报错：用户以为自己填上了，实际没生效才是最糟的
+            if serde_json::from_str::<crate::capabilities::CapabilityOverride>(raw).is_err() {
+                return Err(AppError::General(
+                    "能力覆写不是合法 JSON，字段可用：sizes / quality / seed / refs / mask / endpoint / sizeLabel（或 size_label）"
+                        .into(),
+                ));
+            }
+            conn.execute(
+                "UPDATE models SET capabilities_json = ?2 WHERE id = ?1",
+                params![id, raw],
+            )?;
         }
-        conn.execute(
-            "UPDATE models SET capabilities_json = ?2 WHERE id = ?1",
-            params![id, raw],
-        )?;
+        Some(_) => {
+            conn.execute(
+                "UPDATE models SET capabilities_json = '' WHERE id = ?1",
+                params![id],
+            )?;
+        }
+        None => {}
     }
     Ok(id)
 }
@@ -417,7 +426,7 @@ mod tests {
                 protocol: Protocol::OpenAiImages,
                 model_name: "gpt-image-1".into(),
                 label: "GPT Image".into(),
-                capabilities_override: String::new(),
+                capabilities_override: None,
             },
         )
         .unwrap();
@@ -441,7 +450,7 @@ mod tests {
                 protocol: Protocol::OpenAiImages,
                 model_name: "gpt-image-1".into(),
                 label: "".into(),
-                capabilities_override: String::new(),
+                capabilities_override: None,
             },
         )
         .unwrap();
@@ -452,7 +461,7 @@ mod tests {
                 protocol: Protocol::GeminiNative,
                 model_name: "nano-banana".into(),
                 label: "".into(),
-                capabilities_override: String::new(),
+                capabilities_override: None,
             },
         )
         .unwrap();
@@ -479,7 +488,7 @@ mod tests {
                 protocol: Protocol::OpenAiImages,
                 model_name: "gpt-image-1".into(),
                 label: "".into(),
-                capabilities_override: String::new(),
+                capabilities_override: None,
             },
         )
         .unwrap();
@@ -504,7 +513,7 @@ mod tests {
                 protocol: Protocol::OpenAiImages,
                 model_name: "gpt-image-1".into(),
                 label: "".into(),
-                capabilities_override: String::new(),
+                capabilities_override: None,
             },
         )
         .unwrap();
@@ -532,7 +541,7 @@ mod tests {
                 protocol: Protocol::OpenAiImages,
                 model_name: "my-relay-model".into(),
                 label: "".into(),
-                capabilities_override: r#"{"sizes":["512x512"],"seed":true}"#.into(),
+                capabilities_override: Some(r#"{"sizes":["512x512"],"seed":true}"#.into()),
             },
         )
         .unwrap();
@@ -567,11 +576,44 @@ mod tests {
                 protocol: Protocol::OpenAiImages,
                 model_name: "broken-model".into(),
                 label: "".into(),
-                capabilities_override: "{不是json".into(),
+                capabilities_override: Some("{不是json".into()),
             },
         )
         .unwrap_err();
         assert!(err.to_string().contains("合法 JSON"), "实际：{err}");
+    }
+
+    #[test]
+    fn empty_override_clears_previous_override() {
+        let c = conn();
+        add(
+            &c,
+            &ModelDraft {
+                id: None,
+                protocol: Protocol::OpenAiImages,
+                model_name: "my-relay-model".into(),
+                label: "".into(),
+                capabilities_override: Some(r#"{"sizes":["512x512"]}"#.into()),
+            },
+        )
+        .unwrap();
+        assert!(!list(&c).unwrap()[0].capabilities_override.is_empty());
+
+        // 界面「留空=恢复内置推导」必须真的清掉，而不是保留上一次的 JSON
+        add(
+            &c,
+            &ModelDraft {
+                id: None,
+                protocol: Protocol::OpenAiImages,
+                model_name: "my-relay-model".into(),
+                label: "".into(),
+                capabilities_override: Some("".into()),
+            },
+        )
+        .unwrap();
+        let items = list(&c).unwrap();
+        assert!(items[0].capabilities_override.is_empty(), "覆写应被清除");
+        assert!(items[0].capabilities.allows_size("1024x1024"));
     }
 
     #[test]
@@ -585,7 +627,7 @@ mod tests {
                 protocol: Protocol::OpenAiImages,
                 model_name: "gpt-image-1".into(),
                 label: "".into(),
-                capabilities_override: String::new(),
+                capabilities_override: None,
             },
         )
         .unwrap();
@@ -596,7 +638,7 @@ mod tests {
                 protocol: Protocol::GeminiNative,
                 model_name: "nano-banana".into(),
                 label: "".into(),
-                capabilities_override: String::new(),
+                capabilities_override: None,
             },
         )
         .unwrap();

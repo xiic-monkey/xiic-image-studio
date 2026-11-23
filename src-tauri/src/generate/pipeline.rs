@@ -129,16 +129,25 @@ pub(crate) fn aggregate_status(
 
 /// GUI / MJ：后台跑完，进度通过 Tauri 事件推给前端，命令立即返回 task_id。
 pub fn spawn_task(app: AppHandle, req: TaskRequest) {
+    // 目录与取消标志都在 spawn 前准备好：
+    // - 目录错误可以同步收尾，不会留下一个没人清理的取消项；
+    // - 用户提交后立刻点取消也能命中，不用等后台任务被调度。
+    let dir = match super::images_dir(&app) {
+        Ok(dir) => dir,
+        Err(e) => {
+            let db = app.state::<Db>();
+            super::finish_task(&app, &db, &req.task_id, "failed", Some(e.to_string()));
+            return;
+        }
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    app.state::<super::QueueState>()
+        .cancels()
+        .insert(req.task_id.clone(), cancel.clone());
+
     tauri::async_runtime::spawn(async move {
         let db = app.state::<Db>();
-        let dir = match super::images_dir(&app) {
-            Ok(dir) => dir,
-            Err(e) => {
-                super::finish_task(&app, &db, &req.task_id, "failed", Some(e.to_string()));
-                return;
-            }
-        };
-        let _ = execute(&db, &dir, &req, RunMode::Gui(app.clone())).await;
+        let _ = execute(&db, &dir, &req, RunMode::Gui(app.clone()), Some(cancel)).await;
     });
 }
 
@@ -149,13 +158,19 @@ pub fn run_task_headless(
     runtime: &Runtime,
     req: &TaskRequest,
 ) -> TaskOutcome {
-    runtime.block_on(execute(db, images_dir, req, RunMode::Headless))
+    runtime.block_on(execute(db, images_dir, req, RunMode::Headless, None))
 }
 
-async fn execute(db: &Db, images_dir: &Path, req: &TaskRequest, mode: RunMode) -> TaskOutcome {
+async fn execute(
+    db: &Db,
+    images_dir: &Path,
+    req: &TaskRequest,
+    mode: RunMode,
+    cancel: Option<Arc<AtomicBool>>,
+) -> TaskOutcome {
     let app = mode.app().cloned();
     let inflight = mode.inflight();
-    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel = cancel.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
     if let Some(app) = &app {
         let queue = app.state::<super::QueueState>();
         queue.cancels().insert(req.task_id.clone(), cancel.clone());

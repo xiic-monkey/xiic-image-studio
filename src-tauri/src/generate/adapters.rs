@@ -535,13 +535,16 @@ pub async fn dashscope(ctx: &GenCtx) -> AppResult<ImageOut> {
         })
     };
 
-    let rb = apply_headers(
-        client
-            .post(&url)
-            .bearer_auth(&ctx.key)
-            .header("X-DashScope-Async", "enable"),
-        &ctx.custom_headers,
-    );
+    // qwen-image-3.x 的 multimodal-generation 是同步接口：不能带 X-DashScope-Async，
+    // 响应里也没有 task_id，图直接在 output.choices[].message.content[].image。
+    // 旧版 text2image 才是「提交任务 + 轮询」。
+    let rb = client.post(&url).bearer_auth(&ctx.key);
+    let rb = if is_qwen3 {
+        rb
+    } else {
+        rb.header("X-DashScope-Async", "enable")
+    };
+    let rb = apply_headers(rb, &ctx.custom_headers);
     let resp: Value = send_json(rb.json(&body)).await?;
 
     // 百炼的错误不是 OpenAI 的 error 结构，而是顶层 code/message
@@ -552,6 +555,11 @@ pub async fn dashscope(ctx: &GenCtx) -> AppResult<ImageOut> {
                 .and_then(|m| m.as_str())
                 .unwrap_or("未知错误")
         )));
+    }
+    if is_qwen3 {
+        let img_url = dashscope_image_url(&resp["output"])
+            .ok_or_else(|| AppError::Fetch("百炼 qwen-image 响应中无图片 URL".into()))?;
+        return download_url(img_url).await;
     }
     let task_id = resp["output"]["task_id"]
         .as_str()
@@ -595,7 +603,17 @@ async fn poll_dashscope_task(
             }
         }
         let rb = apply_headers(client.get(&url).bearer_auth(&ctx.key), &ctx.custom_headers);
-        let status: Value = send_json(rb).await?;
+        let status: Value = match send_json(rb).await {
+            Ok(v) => v,
+            // 任务已经提交成功，查询抖动不能当成「请求没发出去」去重试整条链路——
+            // 那会再提交一个付费任务。可重试的错误就留在轮询里继续等。
+            Err(e) if e.is_retryable() => continue,
+            Err(e) => {
+                return Err(AppError::Fetch(format!(
+                    "百炼任务已提交（{task_id}），查询失败：{e}"
+                )))
+            }
+        };
         let output = &status["output"];
         match output["task_status"].as_str().unwrap_or("") {
             "SUCCEEDED" => {
@@ -608,12 +626,16 @@ async fn poll_dashscope_task(
                     .as_str()
                     .or_else(|| output["code"].as_str())
                     .unwrap_or("未知原因");
-                return Err(AppError::General(format!("百炼任务失败: {msg}")));
+                return Err(AppError::Upstream(format!(
+                    "百炼任务失败（{task_id}）: {msg}"
+                )));
             }
             _ => continue,
         }
     }
-    Err(AppError::General("百炼任务超时（5 分钟）".into()))
+    Err(AppError::Fetch(format!(
+        "百炼任务已提交（{task_id}），轮询超时（5 分钟）"
+    )))
 }
 
 // ---------- Stability AI ----------
@@ -811,7 +833,12 @@ async fn poll_flux_task(
             client.get(polling_url).header("x-key", &ctx.key),
             &ctx.custom_headers,
         );
-        let status: Value = send_json(rb).await?;
+        let status: Value = match send_json(rb).await {
+            Ok(v) => v,
+            // 与百炼同理：任务已提交，轮询抖动继续等，绝不回头重新提交。
+            Err(e) if e.is_retryable() => continue,
+            Err(e) => return Err(AppError::Fetch(format!("FLUX 任务已提交，查询失败：{e}"))),
+        };
         match status["status"].as_str().unwrap_or("") {
             "Ready" => {
                 let sample = status["result"]["sample"]
@@ -820,7 +847,7 @@ async fn poll_flux_task(
                 return download_url(sample).await;
             }
             "Error" | "Failed" => {
-                return Err(AppError::General(format!(
+                return Err(AppError::Upstream(format!(
                     "FLUX 任务失败: {}",
                     status["error"]["message"].as_str().unwrap_or("未知原因")
                 )));
@@ -828,7 +855,9 @@ async fn poll_flux_task(
             _ => continue,
         }
     }
-    Err(AppError::General("FLUX 任务超时（5 分钟）".into()))
+    Err(AppError::Fetch(
+        "FLUX 任务已提交，轮询超时（5 分钟）".into(),
+    ))
 }
 
 // ---------- MiniMax 图像 ----------
@@ -1269,6 +1298,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dashscope_poll_transient_error_keeps_polling_same_task() {
+        let (base, cap) = capture_server_n(vec![
+            (
+                200,
+                r#"{"output":{"task_id":"t-1","task_status":"PENDING"}}"#,
+            ),
+            (500, r#"{"message":"upstream hiccup"}"#),
+            (
+                200,
+                r#"{"output":{"task_status":"SUCCEEDED","results":[{"url":"data:image/png;base64,aGk="}]}}"#,
+            ),
+        ]);
+        let c = ctx_for(
+            base,
+            "wan2.6-t2i",
+            crate::provider::types::Protocol::DashScope,
+        );
+        let out = super::dashscope(&c).await.expect("抖动后应继续轮询成功");
+        assert!(!out.bytes.is_empty());
+        let cap = cap.lock().unwrap();
+        assert_eq!(cap.len(), 3);
+        assert!(
+            cap[0].0.starts_with("POST "),
+            "只有第一次是提交，抖动后不能重提交"
+        );
+        assert!(cap[1].0.starts_with("GET /api/v1/tasks/t-1"));
+        assert!(cap[2].0.starts_with("GET /api/v1/tasks/t-1"));
+    }
+
+    #[tokio::test]
     async fn dashscope_reports_task_failure() {
         let (base, _cap) = capture_server_n(vec![
             (
@@ -1289,6 +1348,10 @@ mod tests {
         assert!(
             err.to_string().contains("内容审核未通过"),
             "实际错误：{err}"
+        );
+        assert!(
+            !err.is_retryable(),
+            "任务已提交后失败，重试会重复提交付费任务"
         );
     }
 
@@ -1417,6 +1480,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn flux_poll_transient_error_keeps_polling_same_task() {
+        let (base, cap) = capture_server_n(vec![
+            (
+                200,
+                r#"{"id":"job1","polling_url":"/v1/get_result?id=job1"}"#,
+            ),
+            (500, r#"{"message":"upstream hiccup"}"#),
+            (
+                200,
+                r#"{"status":"Ready","result":{"sample":"data:image/png;base64,aGk="}}"#,
+            ),
+        ]);
+        let c = ctx_for(
+            base,
+            "flux-2-pro",
+            crate::provider::types::Protocol::FluxBfl,
+        );
+        let out = super::flux_bfl(&c).await.expect("抖动后应继续轮询成功");
+        assert!(!out.bytes.is_empty());
+        let cap = cap.lock().unwrap();
+        assert_eq!(cap.len(), 3);
+        assert!(cap[0].0.starts_with("POST /v1/flux-2-pro"), "只有一次提交");
+        assert!(cap[1].0.starts_with("GET /v1/get_result?id=job1"));
+        assert!(cap[2].0.starts_with("GET /v1/get_result?id=job1"));
+    }
+
+    #[tokio::test]
     async fn minimax_uses_edits_endpoint_when_reference_present() {
         let (base, cap) = capture_server(r#"{"data":[{"url":"data:image/png;base64,aGk="}]}"#);
         let mut c = ctx_for(
@@ -1447,26 +1537,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dashscope_qwen3_uses_multimodal_endpoint() {
-        let (base, cap) = capture_server_n(vec![
-            (
-                200,
-                r#"{"output":{"task_id":"t-9","task_status":"PENDING"}}"#,
-            ),
-            (
-                200,
-                r#"{"output":{"task_status":"SUCCEEDED","choices":[{"message":{"content":[{"image":"data:image/png;base64,aGk="}]}}]}}"#,
-            ),
-        ]);
+    async fn dashscope_qwen3_uses_sync_multimodal_endpoint() {
+        let (base, cap) = capture_server_n(vec![(
+            200,
+            r#"{"output":{"choices":[{"message":{"content":[{"image":"data:image/png;base64,aGk="}]}}]}}"#,
+        )]);
         let mut c = ctx_for(
             base,
             "qwen-image-3.0-pro",
             crate::provider::types::Protocol::DashScope,
         );
         c.size = Some("1024*1024".into());
+        c.refs = vec![RefImage {
+            name: "r.png".into(),
+            mime: "image/png".into(),
+            data: "aGk=".into(),
+        }];
         let out = super::dashscope(&c).await.expect("应出图");
         assert!(!out.bytes.is_empty());
         let cap = cap.lock().unwrap();
+        assert_eq!(cap.len(), 1, "同步接口不该再轮询");
         assert!(
             cap[0]
                 .0
@@ -1474,10 +1564,19 @@ mod tests {
             "Qwen-Image 3.0 走 multimodal 端点：{}",
             cap[0].0
         );
+        assert!(
+            !cap[0].0.to_lowercase().contains("x-dashscope-async"),
+            "同步端点不能带异步头：{}",
+            cap[0].0
+        );
         let v: Value = serde_json::from_str(&cap[0].1).expect("请求体应是 JSON");
         assert_eq!(
             v["input"]["messages"][0]["content"][0]["text"], "cat",
             "提示词在 messages.content[].text"
+        );
+        assert_eq!(
+            v["input"]["messages"][0]["content"][1]["image"], "data:image/png;base64,aGk=",
+            "参考图应在 content 里"
         );
     }
 

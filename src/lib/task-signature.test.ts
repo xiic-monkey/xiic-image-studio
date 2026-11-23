@@ -30,3 +30,9 @@ test("图片数量与进度变化会改变指纹", () => {
   assert.notEqual(signature([task]), signature([{ ...task, images: { length: 2 } }]));
   assert.notEqual(signature([task]), signature([{ ...task, done: 2 }]));
 });
+
+test("providerId 与 modelId 变化会改变指纹", () => {
+  // 乐观卡片先没有这两个字段，轮询补齐时必须触发替换，否则重试拿不到原模型
+  assert.notEqual(signature([task]), signature([{ ...task, providerId: "p1" }]));
+  assert.notEqual(signature([task]), signature([{ ...task, modelId: "m1" }]));
+});

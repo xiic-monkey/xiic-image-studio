@@ -394,16 +394,22 @@ fn providers(args: &[String]) -> Result<()> {
         return Ok(());
     }
     println!("可用 provider：");
+    let conn = db.conn();
     for p in &items {
+        // 多对多后 providers.model 只是历史遗留列；以实际默认模型为准。
+        let model = crate::model::db::resolve_for_request(&conn, &p.id, None)
+            .map(|(_, _, name, _)| name)
+            .unwrap_or_else(|_| p.model.clone());
+        let model_label = if model.is_empty() {
+            "默认".to_string()
+        } else {
+            model
+        };
         println!(
             "- {} [{}] model={} key={}",
             p.name,
             p.protocol.as_str(),
-            if p.model.is_empty() {
-                "默认"
-            } else {
-                &p.model
-            },
+            model_label,
             if p.has_key { "已配置" } else { "未配置" }
         );
     }

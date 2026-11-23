@@ -8,6 +8,10 @@ export interface FingerprintedTask {
   errors: { length: number };
   seed?: number | null;
   sessionId?: string | null;
+  /** 重试要靠这两个字段复原供应商与模型；不参与指纹的话，
+   *  轮询拿到的完整数据会被“没变化”的判断丢掉，卡片永远缺它们。 */
+  providerId?: string;
+  modelId?: string | null;
 }
 
 export function signature(list: FingerprintedTask[]): string {
@@ -21,6 +25,8 @@ export function signature(list: FingerprintedTask[]): string {
         t.errors.length,
         t.seed ?? "",
         t.sessionId ?? "",
+        t.providerId ?? "",
+        t.modelId ?? "",
       ].join(":"),
     )
     .join("|");

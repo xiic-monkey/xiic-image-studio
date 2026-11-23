@@ -380,10 +380,18 @@ pub fn create_task(
     Ok(task_id)
 }
 
-/// 进程重启 = 所有 in-process worker 已死，库里残留的 `status='running'`
-/// 不可能再有人推进，必须批量收尾，否则 UI 永远卡在「生成中」无法清理。
+/// 进程重启 = 本进程的 worker 已死，库里残留的 `status='running'`
+/// 不可能再由本进程推进，需要收尾。但库里也可能有**另一个进程**（无头 CLI）
+/// 正在跑的任务：CLI 任务的 session_id 恒为 NULL，一概标成取消会误杀它们。
+///
+/// 规则：有会话归属的任务直接收尾（GUI 任务正常都带会话）；无归属的只在创建
+/// 超过 1 小时后才当遗留——单任务最长约 5 分钟（含重试与下载也远小于 1 小时），
+/// 正在跑的 CLI 任务不会被启动中的 GUI 打断。
+///
 /// 有产出的标 completed_with_errors（图片保留），没产出的标 canceled。
 pub fn reclaim_orphan_tasks(conn: &rusqlite::Connection) -> AppResult<u32> {
+    let now = chrono::Utc::now();
+    let cutoff = (now - chrono::Duration::hours(1)).to_rfc3339();
     let n = conn.execute(
         "UPDATE tasks SET \
            status = CASE WHEN (SELECT COUNT(*) FROM images i WHERE i.task_id = tasks.id) > 0 \
@@ -393,8 +401,9 @@ pub fn reclaim_orphan_tasks(conn: &rusqlite::Connection) -> AppResult<u32> {
                           THEN '进程重启，任务中断（已产出的图片已保留）' \
                           ELSE '进程重启，遗留任务已自动取消' END), \
            finished_at = COALESCE(finished_at, ?1) \
-         WHERE status='running'",
-        params![chrono::Utc::now().to_rfc3339()],
+         WHERE status='running' \
+           AND (session_id IS NOT NULL OR created_at < ?2)",
+        params![now.to_rfc3339(), cutoff],
     )?;
     Ok(n as u32)
 }
@@ -732,6 +741,28 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         let err = reclaim_orphan_tasks(&conn).unwrap_err();
         assert!(err.to_string().contains("no such table"), "实际：{err}");
+    }
+
+    #[test]
+    fn recent_cli_task_is_not_reclaimed() {
+        // 无头 CLI 任务没有 session_id；GUI 启动时若把它当遗留取消，
+        // 用户删任务后 CLI 后续图片会因外键缺失而进不了画廊。
+        let conn = Connection::open_in_memory().unwrap();
+        crate::storage::init(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, session_id, provider_id, protocol, request_json, status, concurrency, total, created_at)
+             VALUES ('t-cli', NULL, 'p-1', 'openai_images', '{}', 'running', 1, 1, ?1)",
+            params![chrono::Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+        let n = reclaim_orphan_tasks(&conn).unwrap();
+        assert_eq!(n, 0, "刚创建的 CLI 任务不该被收尾");
+        let status: String = conn
+            .query_row("SELECT status FROM tasks WHERE id='t-cli'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(status, "running");
     }
 
     fn session_row(conn: &Connection) {

@@ -57,7 +57,7 @@ ProviderConfig {
 | **GeminiNative** | `POST {base}/v1beta/models/{m}:generateContent` | gemini-2.5-flash-image |
 | **MidjourneyProxy** | `/mj/submit/imagine`、`/mj/task/{id}/fetch`（轮询） | midjourney 系（含垫图、U/V 操作） |
 | **VolcengineArk** | `POST {base}/api/v3/images/generations`（同步，OpenAI 兼容） | 豆包 Seedream 4/5、即梦；国内直连免梯子 |
-| **DashScope** | `POST {base}/api/v1/services/aigc/text2image/image-synthesis` + `GET /api/v1/tasks/{id}`（异步轮询） | 通义万相 wan2.x；国内直连 |
+| **DashScope** | wan2.x：`POST {base}/api/v1/services/aigc/text2image/image-synthesis` + `GET /api/v1/tasks/{id}`（异步轮询）；qwen-image-3.x：`POST {base}/api/v1/services/aigc/multimodal-generation/generation`（同步，图在 `output.choices[]`） | 通义万相 wan2.x、Qwen-Image 3.0（支持参考图）；国内直连 |
 | **Stability** | `POST {base}/v2beta/stable-image/generate/{model}`（multipart，Accept 头切换字节/JSON） | Stable Image Core/Ultra、SD3.5；尺寸是画面比例，seed 是标准参数 |
 | **Ideogram** | `POST {base}/v1/{model}/generate`（Api-Key 头，提示词字段叫 text_prompt） | Ideogram 4/3；文字排版最强；模型名在路径里 |
 | **FluxBfl** | `POST {base}/v1/{model}` + 轮询 `polling_url`（x-key 头，宽高分开传） | FLUX.2 pro/max/flex/klein；结果 URL 十分钟过期 |

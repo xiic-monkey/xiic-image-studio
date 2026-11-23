@@ -109,11 +109,13 @@ fn new_id() -> String {
 
 pub fn save(conn: &Connection, input: &SaveInput) -> AppResult<()> {
     let now = chrono::Utc::now().to_rfc3339();
-    let existing: Option<String> = conn
+    // 同时取旧的 model/protocol：编辑时如果这两个变了，说明用户想换模型/协议，
+    // 得把新模型设为默认，否则出图仍走旧默认（界面上看着像换了，实际没换）。
+    let existing: Option<(String, String)> = conn
         .query_row(
-            "SELECT id FROM providers WHERE id = ?1",
+            "SELECT model, protocol FROM providers WHERE id = ?1",
             params![input.id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
     let headers_json = serde_json::to_string(&input.custom_headers).unwrap_or_default();
@@ -163,6 +165,17 @@ pub fn save(conn: &Connection, input: &SaveInput) -> AppResult<()> {
     if !input.model.trim().is_empty() {
         let model_id = crate::model::db::ensure_model(conn, input.protocol, input.model.trim())?;
         crate::model::db::add_to_provider(conn, &input.id, &model_id)?;
+        // 编辑时改了模型名或协议：把这次填的模型切成默认。
+        // 只是改名字/baseUrl 等不动默认，避免把用户在模型库里选的默认模型冲掉。
+        let changed = match &existing {
+            Some((old_model, old_protocol)) => {
+                old_model != &input.model || old_protocol != input.protocol.as_str()
+            }
+            None => false, // 新建时 add_to_provider 已把第一条关联设为默认
+        };
+        if changed {
+            crate::model::db::set_default(conn, &input.id, &model_id)?;
+        }
     }
     Ok(())
 }
@@ -201,8 +214,28 @@ pub fn encrypt_plaintext_keys(conn: &Connection) -> AppResult<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::encrypt_plaintext_keys;
+    use super::{encrypt_plaintext_keys, SaveInput};
+    use crate::provider::types::Protocol;
     use rusqlite::params;
+    use std::collections::BTreeMap;
+
+    fn save_input(id: &str, name: &str, protocol: Protocol, model: &str) -> SaveInput {
+        SaveInput {
+            id: id.into(),
+            name: name.into(),
+            base_url: "https://x.test".into(),
+            protocol,
+            model: model.into(),
+            custom_headers: BTreeMap::new(),
+            api_key: Some("sk-test".into()),
+        }
+    }
+
+    fn conn() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::storage::init(&conn).unwrap();
+        conn
+    }
 
     fn insert_provider(conn: &rusqlite::Connection, id: &str, key: &str) {
         conn.execute(
@@ -260,5 +293,60 @@ mod tests {
         assert!(!items[0].capabilities.seed);
         assert!(items[0].capabilities.mask);
         assert_eq!(items[0].capabilities.endpoint, "images");
+    }
+
+    #[test]
+    fn changing_model_on_existing_provider_switches_default() {
+        let conn = conn();
+        super::save(
+            &conn,
+            &save_input("p1", "供应商", Protocol::OpenAiImages, "model-a"),
+        )
+        .unwrap();
+        // 只改显示名：默认模型不能被冲掉
+        super::save(
+            &conn,
+            &save_input("p1", "改名了", Protocol::OpenAiImages, "model-a"),
+        )
+        .unwrap();
+        let (_, _, name, _) = crate::model::db::resolve_for_request(&conn, "p1", None).unwrap();
+        assert_eq!(name, "model-a");
+
+        // 改模型名：新的必须成为默认，否则界面换了模型、出图还在用旧模型
+        super::save(
+            &conn,
+            &save_input("p1", "改名了", Protocol::OpenAiImages, "model-b"),
+        )
+        .unwrap();
+        let (_, _, name, _) = crate::model::db::resolve_for_request(&conn, "p1", None).unwrap();
+        assert_eq!(name, "model-b", "编辑供应商换模型后应切换默认");
+    }
+
+    #[test]
+    fn changing_protocol_on_existing_provider_switches_default_model() {
+        let conn = conn();
+        super::save(
+            &conn,
+            &save_input("p1", "供应商", Protocol::OpenAiImages, "model-a"),
+        )
+        .unwrap();
+        super::save(
+            &conn,
+            &save_input("p1", "供应商", Protocol::GeminiNative, "model-a"),
+        )
+        .unwrap();
+        let (_, protocol, name, _) =
+            crate::model::db::resolve_for_request(&conn, "p1", None).unwrap();
+        assert_eq!(protocol, Protocol::GeminiNative, "默认模型应切到新协议");
+        assert_eq!(name, "model-a");
+
+        let defaults: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM provider_models WHERE provider_id='p1' AND is_default=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(defaults, 1, "默认模型只能有一个");
     }
 }

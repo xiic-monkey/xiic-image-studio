@@ -13,7 +13,7 @@ import {
   parseSeedBase,
   remainingText,
 } from "../lib/submission.ts";
-import type { Capabilities, ProviderListItem, RefImage, TaskUpsert, TaskView } from "../types";
+import type { Capabilities, GenerateRequest, ProviderListItem, RefImage, TaskUpsert, TaskView } from "../types";
 
 export interface SubmissionContext {
   providers: ProviderListItem[];
@@ -34,18 +34,27 @@ export interface SubmissionContext {
 export function useSubmissions(ctx: SubmissionContext) {
   const [submitting, setSubmitting] = useState(false);
 
-  const optimistic = (taskId: string, prompt: string, n: number, seed: number | null, sessionId: string | null) => {
+  const optimistic = (taskId: string, req: GenerateRequest, prompt: string) => {
+    // 乐观卡片直接把重试要用的字段带全：等 3 秒轮询补齐太脆弱，
+    // 任何一次“指纹相同就跳过”的判断都会让卡片长期缺 provider/model。
     const card: TaskUpsert = {
       id: taskId,
       status: "running",
       done: 0,
-      total: n,
+      total: req.n,
       errors: [],
       images: [],
       createdAt: new Date().toISOString(),
       prompt,
-      seed,
-      sessionId,
+      providerId: req.provider_id,
+      size: req.size ?? null,
+      quality: req.quality ?? null,
+      n: req.n,
+      refCount: req.refs.length,
+      seed: req.seed ?? null,
+      sessionId: req.session_id ?? null,
+      modelId: req.model_id ?? null,
+      modelName: null,
     };
     ctx.upsert(card);
   };
@@ -96,7 +105,7 @@ export function useSubmissions(ctx: SubmissionContext) {
             caps,
           );
           const taskId = await api.generateSubmit(req);
-          optimistic(taskId, s.prompt, req.n, req.seed ?? null, req.session_id ?? null);
+          optimistic(taskId, req, s.prompt);
           submitted += 1;
         } catch (e) {
           failMsg = errorMessage(e);
@@ -169,7 +178,7 @@ export function useSubmissions(ctx: SubmissionContext) {
             ctx.caps ?? provider.capabilities,
           );
           const taskId = await api.generateSubmit(req);
-          optimistic(taskId, it.prompt, req.n, req.seed ?? null, req.session_id ?? null);
+          optimistic(taskId, req, it.prompt);
           ok += 1;
         } catch (e) {
           ctx.setNotice(`批量提交在第 ${ok + 1} 行失败：${errorMessage(e)}（已提交 ${ok} 条）`);
@@ -191,11 +200,11 @@ export function useSubmissions(ctx: SubmissionContext) {
     }
     try {
       // 参考图本体没入库，只有 refCount === 0 的任务才会走到这里。
-      // 能力表取当前所选模型；重试请求带任务原 modelId，由后端复原到具体模型。
-      const caps = ctx.caps ?? ctx.providers.find((p) => p.id === t.providerId)?.capabilities;
-      const req = retryRequest(t, ctx.sessionId, caps);
+      // 不传 caps：重试要按任务原模型复现参数，由后端用原 modelId 的能力裁剪；
+      // 拿当前选中模型的能力会把 size/quality 换成另一张表的值，甚至丢掉 seed。
+      const req = retryRequest(t, ctx.sessionId);
       const taskId = await api.generateSubmit(req);
-      optimistic(taskId, t.prompt, req.n, req.seed ?? null, req.session_id ?? null);
+      optimistic(taskId, req, t.prompt);
       ctx.setNotice("已按原参数重新提交");
     } catch (e) {
       ctx.setNotice(`重试失败：${errorMessage(e)}`);

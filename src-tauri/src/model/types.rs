@@ -43,6 +43,7 @@ pub struct ModelDraft {
     #[serde(default)]
     pub label: String,
     /// 能力覆写 JSON（可选）。非法 JSON 在保存时报错，不静默丢弃。
+    /// `None` = 不改动；`Some("")` = 显式清除已有覆写。
     #[serde(default)]
-    pub capabilities_override: String,
+    pub capabilities_override: Option<String>,
 }

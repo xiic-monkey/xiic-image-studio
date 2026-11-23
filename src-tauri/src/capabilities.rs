@@ -77,7 +77,9 @@ pub struct CapabilityOverride {
     pub mask: Option<bool>,
     #[serde(default)]
     pub endpoint: Option<String>,
-    #[serde(default)]
+    // 前端提示里写的是 sizeLabel（与 Capabilities 的 camelCase 一致），
+    // 这里兼容两种拼写，避免用户按界面提示填写却被静默忽略。
+    #[serde(default, alias = "sizeLabel")]
     pub size_label: Option<String>,
 }
 
@@ -126,8 +128,9 @@ const FLUX_SIZES: &[&str] = &[
     "768x1280",
     "1536x864",
     "864x1536",
-    "1920x1080",
-    "1080x1920",
+    // 宽高必须是 16 的倍数：1088 = 16*68，1080 不是
+    "1920x1088",
+    "1088x1920",
 ];
 /// MiniMax 的 size 是「宽x高」，比例另走 aspect_ratio
 const MINIMAX_SIZES: &[&str] = &[
@@ -284,6 +287,20 @@ static MODEL_RULES: &[ModelRule] = &[
         seed: Some(false),
         ..ModelRule::none()
     },
+    // Qwen-Image 3.x 的同步 multimodal 端点允许在 content 里带参考图；
+    // wan2.x 的 text2image 端点不支持，继续用协议默认的 refs=false。
+    ModelRule {
+        protocol: Protocol::DashScope,
+        prefix: "qwen-image-3",
+        refs: Some(true),
+        ..ModelRule::none()
+    },
+    ModelRule {
+        protocol: Protocol::DashScope,
+        prefix: "qwen3-image",
+        refs: Some(true),
+        ..ModelRule::none()
+    },
 ];
 
 /// 协议默认能力。新增协议时在这里加一个分支。
@@ -395,9 +412,11 @@ fn protocol_defaults(protocol: Protocol) -> CapsSpec {
 pub fn for_model(protocol: Protocol, model: &str) -> Capabilities {
     let m = normalize_model(model);
     let mut spec = protocol_defaults(protocol);
-    if let Some(rule) = MODEL_RULES
+    // 前缀规则可能重叠（如 recraftv 与 recraftv4），按声明顺序全部应用：
+    // 写在后面的更具体规则覆盖前面的宽规则，未声明的字段保持原值。
+    for rule in MODEL_RULES
         .iter()
-        .find(|r| r.protocol == protocol && m.starts_with(r.prefix))
+        .filter(|r| r.protocol == protocol && m.starts_with(r.prefix))
     {
         if let Some(s) = rule.sizes {
             spec.sizes = s;
@@ -602,6 +621,8 @@ mod tests {
         assert!(c.quality.is_empty(), "Recraft 没有 quality");
         assert!(!c.seed, "Recraft 的种子字段叫 random_seed，这条链路不下发");
         assert!(c.allows_size("1024x1024"));
+        // 宽规则 recraftv 在前、V4 尺寸规则在后，两条必须同时生效
+        assert!(!c.allows_size("2048x2048"), "V4 不支持 2K 方图");
     }
 
     #[test]
@@ -648,9 +669,9 @@ mod tests {
     #[test]
     fn flux_klein_has_smaller_size_table() {
         let pro = for_model(Protocol::FluxBfl, "flux-2-pro");
-        assert!(pro.allows_size("1920x1080"));
+        assert!(pro.allows_size("1920x1088"));
         let klein = for_model(Protocol::FluxBfl, "flux-2-klein-9b");
-        assert!(!klein.allows_size("1920x1080"));
+        assert!(!klein.allows_size("1920x1088"));
         assert!(klein.allows_size("1024x1024"));
     }
 
@@ -681,6 +702,22 @@ mod tests {
         let o = parse_override(Some(r#"{"seed":true}"#)).unwrap();
         assert_eq!(o.seed, Some(true));
         assert!(o.sizes.is_none());
+    }
+
+    #[test]
+    fn parse_override_accepts_sizeLabel_alias() {
+        // 界面提示写的是 sizeLabel（camelCase），后端字段是 size_label；
+        // 两种写法都要生效，否则用户填了等于没填。
+        let o = parse_override(Some(r#"{"sizeLabel":"画面比例"}"#)).unwrap();
+        assert_eq!(o.size_label.as_deref(), Some("画面比例"));
+    }
+
+    #[test]
+    fn qwen_image_3_on_dashscope_accepts_refs() {
+        let qwen3 = for_model(Protocol::DashScope, "qwen-image-3.0-pro");
+        assert!(qwen3.refs, "qwen-image-3.x 的同步端点收参考图");
+        let wan = for_model(Protocol::DashScope, "wan2.6-t2i");
+        assert!(!wan.refs, "wan2.x 的 text2image 端点不收参考图");
     }
 
     #[test]
