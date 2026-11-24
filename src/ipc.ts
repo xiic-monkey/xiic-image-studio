@@ -31,6 +31,7 @@ export const api = {
   taskList: (limit?: number) => invoke<TaskItem[]>("task_list", { limit }),
   taskDelete: (id: string) => invoke<void>("task_delete", { id }),
   imageReadB64: (path: string) => invoke<string>("image_read_b64", { path }),
+  imageCopy: (path: string) => invoke<void>("image_copy", { path }),
   imageList: (opts?: { q?: string; favoriteOnly?: boolean; model?: string; limit?: number; offset?: number }) =>
     invoke<GalleryItem[]>("image_list", {
       q: opts?.q ?? null,
@@ -61,7 +62,6 @@ export const api = {
   sessionList: () => invoke<SessionItem[]>("session_list"),
   sessionSave: (session: { id?: string; name?: string; draft?: unknown }) =>
     invoke<string>("session_save", { session }),
-  sessionDelete: (id: string) => invoke<void>("session_delete", { id }),
   mjAction: (imageId: string, command: string) => invoke<string>("mj_action", { imageId, command }),
   toolsStatus: () =>
     invoke<{ available: boolean; path: string; source: string; formats: Record<string, boolean> | null }>("tools_status"),

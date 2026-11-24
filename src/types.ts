@@ -100,6 +100,8 @@ export interface RefImage {
   name: string;
   mime: string;
   data: string; // base64 无前缀
+  /** 来源图片 id（images 表），仅用于去重；后端忽略该字段 */
+  id?: string;
 }
 
 export interface GenerateRequest {

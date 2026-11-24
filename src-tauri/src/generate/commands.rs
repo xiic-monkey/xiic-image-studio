@@ -10,6 +10,7 @@ use crate::provider::types::Protocol;
 use crate::storage::Db;
 use rusqlite::{params, OptionalExtension};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use tauri::{AppHandle, Manager, State};
 
 #[tauri::command]
@@ -322,6 +323,35 @@ pub fn image_read_b64(app: AppHandle, path: String) -> AppResult<String> {
         .map_err(|e| AppError::General(e.to_string()))?
         .join("images");
     generate::read_file_b64(&root, &path)
+}
+
+/// 把图片复制到系统剪贴板。解码在后端完成，前端只传一个路径——
+/// 否则要把整张图的 base64 传到前端、解码成 RGBA 再传回来，两次大块 IPC 会明显卡顿。
+#[tauri::command]
+pub fn image_copy(app: AppHandle, path: String) -> AppResult<()> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    let root = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| AppError::General(e.to_string()))?
+        .join("images");
+    let p = PathBuf::from(&path);
+    let p = if p.is_absolute() { p } else { root.join(p) };
+    let canonical = p
+        .canonicalize()
+        .map_err(|e| AppError::General(e.to_string()))?;
+    let root_canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
+    if !canonical.starts_with(&root_canonical) {
+        return Err(AppError::General("路径越界".into()));
+    }
+    let img = image::open(&canonical)
+        .map_err(|e| AppError::General(format!("图片解码失败：{e}")))?;
+    let rgba = img.to_rgba8();
+    let tauri_img = tauri::image::Image::new_owned(rgba.as_raw().to_vec(), rgba.width(), rgba.height());
+    app.clipboard()
+        .write_image(&tauri_img)
+        .map_err(|e| AppError::General(e.to_string()))?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -4,6 +4,14 @@ import { api } from "../ipc";
 import { errorMessage } from "../lib/error";
 import { useProviders } from "../stores/providers";
 import {
+  btnCls,
+  btnCompactCls,
+  btnGhostCls,
+  btnPrimaryCls,
+  inputCls,
+  labelCls,
+} from "../ui/controls";
+import {
   PROTOCOL_LABELS,
   PROTOCOL_PRESET_MODELS,
   PROTOCOL_PRESET_URL,
@@ -135,10 +143,6 @@ export default function ProviderForm({ editing, onClose }: Props) {
     }
   };
 
-  const inputCls =
-    "w-full rounded-md border border-neutral-300 bg-white px-3 py-2 text-sm focus:border-orange-500 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100";
-  const labelCls = "mb-1 block text-xs font-medium text-neutral-500 dark:text-neutral-400";
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6">
       <div className="max-h-full w-[560px] overflow-y-auto rounded-xl bg-white p-6 shadow-xl dark:bg-neutral-900">
@@ -211,7 +215,7 @@ export default function ProviderForm({ editing, onClose }: Props) {
             <div className="flex gap-2">
               <input className={inputCls} value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://..." />
               <button
-                className="shrink-0 rounded-md border border-neutral-300 px-3 text-xs text-neutral-600 hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-800"
+                className={`${btnCompactCls} shrink-0`}
                 onClick={() => setBaseUrl(PROTOCOL_PRESET_URL[protocol])}
               >预设</button>
             </div>
@@ -229,7 +233,7 @@ export default function ProviderForm({ editing, onClose }: Props) {
             <div className="flex gap-2">
               <input className={inputCls} value={model} onChange={(e) => setModel(e.target.value)} placeholder="gpt-image-2.5" list="discovered-models" />
               <button
-                className="shrink-0 rounded-md border border-neutral-300 px-3 text-xs text-neutral-600 hover:bg-neutral-100 disabled:opacity-50 dark:border-neutral-700 dark:text-neutral-300"
+                className={`${btnCompactCls} shrink-0`}
                 onClick={runDiscover}
                 disabled={discovering}
               >{discovering ? "发现中…" : "发现模型"}</button>
@@ -278,13 +282,13 @@ export default function ProviderForm({ editing, onClose }: Props) {
 
           <div className="flex justify-between pt-2">
             <button
-              className="rounded-md border border-neutral-300 px-4 py-2 text-sm text-neutral-700 hover:bg-neutral-100 disabled:opacity-50 dark:border-neutral-700 dark:text-neutral-200 dark:hover:bg-neutral-800"
+              className={btnCls}
               onClick={runTest} disabled={testing}>
               {testing ? "测试中…" : "连通测试"}
             </button>
             <div className="flex gap-2">
-              <button className="rounded-md px-4 py-2 text-sm text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800" onClick={onClose}>取消</button>
-              <button className="rounded-md bg-orange-600 px-4 py-2 text-sm text-white hover:bg-orange-700 disabled:opacity-50"
+              <button className={btnGhostCls} onClick={onClose}>取消</button>
+              <button className={btnPrimaryCls}
                 onClick={save} disabled={saving}>
                 {saving ? "保存中…" : "保存"}
               </button>

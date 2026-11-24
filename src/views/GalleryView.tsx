@@ -1,11 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
+import { useAddAsRef } from "../hooks/useAddAsRef";
+import { useCopyImage } from "../hooks/useCopyImage";
 import { api } from "../ipc";
 import { errorMessage } from "../lib/error";
-import { dataUrlToRef, MAX_REFS } from "../lib/ref-image";
-import { useAssets } from "../stores/assets";
 import { useNav } from "../stores/nav";
 import { usePrefill } from "../stores/prefill";
+import { useToast } from "../stores/toast";
+import ContextMenu from "../ui/ContextMenu";
+import { btnCls, btnToggleCls, inputCls } from "../ui/controls";
 import type { GalleryItem } from "../types";
 
 export default function GalleryView() {
@@ -15,17 +18,14 @@ export default function GalleryView() {
   const [loading, setLoading] = useState(false);
   const [preview, setPreview] = useState<number>(-1);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
   const [ctx, setCtx] = useState<{ x: number; y: number; id: string } | null>(null);
   const urlCache = useRef<Map<string, string>>(new Map());
   const sendPrefill = usePrefill((s) => s.send);
-  const addRefs = useAssets((s) => s.addRefs);
   const setTab = useNav((s) => s.setTab);
 
-  const setNoticeToast = (msg: string) => {
-    setToast(msg);
-    setTimeout(() => setToast(null), 4000);
-  };
+  const setNoticeToast = useToast((s) => s.show);
+  const addAsRefs = useAddAsRef(setNoticeToast);
+  const copyImage = useCopyImage(setNoticeToast);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -99,6 +99,11 @@ export default function GalleryView() {
     [items, thumbUrl],
   );
 
+  // 预览层：点容器自身的空白处关闭；按钮/图片/MJ 区域点在子元素上，不误关。
+  const closeOnBackdrop = (e: MouseEvent<HTMLDivElement>) => {
+    if (e.target === e.currentTarget) setPreview(-1);
+  };
+
   useEffect(() => {
     if (preview < 0) return;
     const onKey = (e: KeyboardEvent) => {
@@ -122,51 +127,35 @@ export default function GalleryView() {
     setPreview(-1);
   };
 
-  const refilling = async (it: GalleryItem) => {
+  const refilling = (it: GalleryItem) => {
     sendPrefill({
       prompt: it.prompt,
       size: it.params?.size,
       quality: it.params?.quality,
     });
+    // prefill 由工作台挂载时的 effect 消费；不切过去就看不到回填结果
+    setTab("workbench");
   };
 
   const addAsRef = async (it: GalleryItem) => {
-    try {
-      const dataUrl = await api.imageReadB64(it.path);
-      const name = it.path.split("/").pop() || `image-${it.id}`;
-      const added = addRefs([dataUrlToRef(dataUrl, name)]);
-      if (added === 0) {
-        setNoticeToast(`参考图已满，最多 ${MAX_REFS} 张`);
-        return;
-      }
-      // 不在这里提示成功：切到工作台会立刻卸载本视图，提示只会闪一下。
-      // 参考图缩略图出现在工作台，本身就是结果。
-      setTab("workbench");
-    } catch (err) {
-      setNoticeToast(errorMessage(err));
-    }
+    const { added, duplicates } = await addAsRefs([{ path: it.path, id: it.id }]);
+    // 不在这里提示成功：切到工作台会立刻卸载本视图，提示只会闪一下。
+    // 参考图缩略图出现在工作台，本身就是结果。
+    if (added > 0 || duplicates > 0) setTab("workbench");
   };
 
   // 继续生成：继承这张图的提示词/参数，并把原图作为参考图，跳回工作台再出一版。
   // 先加参考图、成功后再回填提示词——满 4 张时只提示，不改动用户当前的提示词。
   const continueGenerating = async (it: GalleryItem) => {
-    try {
-      const dataUrl = await api.imageReadB64(it.path);
-      const name = it.path.split("/").pop() || `image-${it.id}`;
-      const added = addRefs([dataUrlToRef(dataUrl, name)]);
-      if (added === 0) {
-        setNoticeToast(`参考图已满，最多 ${MAX_REFS} 张`);
-        return;
-      }
-      sendPrefill({
-        prompt: it.prompt,
-        size: it.params?.size,
-        quality: it.params?.quality,
-      });
-      setTab("workbench");
-    } catch (err) {
-      setNoticeToast(errorMessage(err));
-    }
+    const { added, duplicates } = await addAsRefs([{ path: it.path, id: it.id }]);
+    // 图已在参考里（重复）也要回填参数；只有真满额才不动用户的提示词
+    if (added === 0 && duplicates === 0) return;
+    sendPrefill({
+      prompt: it.prompt,
+      size: it.params?.size,
+      quality: it.params?.quality,
+    });
+    setTab("workbench");
   };
 
   // 导出当前筛选条件下的图记录为 JSONL。字段与「导入批量」一致，
@@ -224,22 +213,19 @@ export default function GalleryView() {
     };
   }, [ctx]);
 
-  const inputCls =
-    "rounded-md border border-neutral-300 bg-white px-3 py-2 text-sm focus:border-orange-500 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100";
-
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-3 border-b border-neutral-200 px-6 py-3 dark:border-neutral-800">
         <h1 className="text-lg font-medium">画廊</h1>
-        <input className={`${inputCls} w-64`} placeholder="搜索提示词…" value={q} onChange={(e) => setQ(e.target.value)} />
+        <input className={`${inputCls} w-64!`} placeholder="搜索提示词…" value={q} onChange={(e) => setQ(e.target.value)} />
         <button
-          className={`rounded-md px-3 py-2 text-sm ${favOnly ? "bg-orange-600 text-white" : "border border-neutral-300 text-neutral-600 hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-300"}`}
+          className={btnToggleCls(favOnly)}
           onClick={() => setFavOnly(!favOnly)}
         >
           ★ 收藏
         </button>
         <button
-          className="rounded-md border border-neutral-300 px-3 py-2 text-sm text-neutral-600 hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-300"
+          className={btnCls}
           onClick={() => void exportJsonl()}
           title="把当前筛选出的图导出为 JSONL，格式与「导入批量」一致，可原样导回"
         >
@@ -286,56 +272,58 @@ export default function GalleryView() {
 
       {/* 右键菜单 */}
       {ctx && (
-        <div
-          className="fixed z-[70] w-40 rounded-md border border-neutral-200 bg-white py-1 text-sm shadow-lg dark:border-neutral-700 dark:bg-neutral-900"
-          style={{
-            left: Math.min(ctx.x, window.innerWidth - 168),
-            top: Math.min(ctx.y, window.innerHeight - 84),
-          }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <button
-            className="block w-full px-3 py-1.5 text-left hover:bg-neutral-100 dark:hover:bg-neutral-800"
-            onClick={() => {
-              const item = items.find((it) => it.id === ctx.id);
-              setCtx(null);
-              if (item) void addAsRef(item);
-            }}
-          >
-            加入参考图
-          </button>
-          <button
-            className="block w-full px-3 py-1.5 text-left hover:bg-neutral-100 dark:hover:bg-neutral-800"
-            onClick={() => {
-              const item = items.find((it) => it.id === ctx.id);
-              setCtx(null);
-              if (item) void continueGenerating(item);
-            }}
-          >
-            继续生成
-          </button>
-          <button
-            className="block w-full px-3 py-1.5 text-left hover:bg-neutral-100 dark:hover:bg-neutral-800"
-            onClick={() => {
-              const item = items.find((it) => it.id === ctx.id);
-              setCtx(null);
-              if (item) void saveAsPreset(item);
-            }}
-          >
-            存为配方
-          </button>
-        </div>
+        <ContextMenu
+          x={ctx.x}
+          y={ctx.y}
+          items={[
+            {
+              label: "加入参考图",
+              onClick: () => {
+                const item = items.find((it) => it.id === ctx.id);
+                setCtx(null);
+                if (item) void addAsRef(item);
+              },
+            },
+            {
+              label: "继续生成",
+              onClick: () => {
+                const item = items.find((it) => it.id === ctx.id);
+                setCtx(null);
+                if (item) void continueGenerating(item);
+              },
+            },
+            {
+              label: "存为配方",
+              onClick: () => {
+                const item = items.find((it) => it.id === ctx.id);
+                setCtx(null);
+                if (item) void saveAsPreset(item);
+              },
+            },
+            {
+              label: "复制图片",
+              onClick: () => {
+                const item = items.find((it) => it.id === ctx.id);
+                setCtx(null);
+                if (item) void copyImage(item.path);
+              },
+            },
+            {
+              label: "在 Finder 打开",
+              onClick: () => {
+                const item = items.find((it) => it.id === ctx.id);
+                setCtx(null);
+                if (item) void api.imageReveal(item.id);
+              },
+            },
+          ]}
+        />
       )}
 
       {/* 预览 */}
-      {toast && (
-        <div className="fixed bottom-6 left-1/2 z-[60] -translate-x-1/2 rounded-md bg-neutral-800 px-4 py-2 text-xs text-white shadow-lg">
-          {toast}
-        </div>
-      )}
       {preview >= 0 && items[preview] && (
-        <div className="fixed inset-0 z-50 flex flex-col bg-black/85 p-4" onClick={() => setPreview(-1)}>
-          <div className="flex items-center justify-between px-2 pb-2 text-sm text-white/90" onClick={(e) => e.stopPropagation()}>
+        <div className="fixed inset-0 z-50 flex flex-col bg-black/85 p-4" onClick={closeOnBackdrop}>
+          <div className="flex items-center justify-between px-2 pb-2 text-sm text-white/90" onClick={closeOnBackdrop}>
             <div className="flex items-center gap-2">
               <button className="rounded bg-white/10 px-3 py-1.5 hover:bg-white/20" onClick={() => preview > 0 && openPreview(preview - 1)}>←</button>
               <button className="rounded bg-white/10 px-3 py-1.5 hover:bg-white/20" onClick={() => preview < items.length - 1 && openPreview(preview + 1)}>→</button>
@@ -354,14 +342,14 @@ export default function GalleryView() {
               <button className="rounded bg-white/10 px-3 py-1.5 hover:bg-white/20" onClick={() => setPreview(-1)}>×</button>
             </div>
           </div>
-          <div className="flex min-h-0 flex-1 items-center justify-center" onClick={(e) => e.stopPropagation()}>
+          <div className="flex min-h-0 flex-1 items-center justify-center" onClick={closeOnBackdrop}>
             {previewUrl ? (
-              <img src={previewUrl} className="max-h-full max-w-full rounded-lg object-contain" alt="" />
+              <img src={previewUrl} className="max-h-full max-w-full rounded-lg object-contain" alt="" onClick={(e) => e.stopPropagation()} />
             ) : (
               <div className="h-16 w-16 animate-pulse rounded bg-white/10" />
             )}
           </div>
-          <div className="mx-auto max-w-3xl px-2 pt-2 text-center text-xs text-white/70" onClick={(e) => e.stopPropagation()}>
+          <div className="mx-auto max-w-3xl px-2 pt-2 text-center text-xs text-white/70" onClick={closeOnBackdrop}>
             <p className="line-clamp-2">{items[preview].prompt}</p>
             <p className="mt-1 text-white/40">
               {items[preview].model} · {items[preview].width}×{items[preview].height} · {items[preview].params?.size ?? ""} {items[preview].params?.quality ?? ""}

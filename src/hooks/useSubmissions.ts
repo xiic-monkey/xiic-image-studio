@@ -24,6 +24,8 @@ export interface SubmissionContext {
   refs: RefImage[];
   mask: RefImage | null;
   sessionId: string;
+  /** 草稿会话是否就绪；未就绪时 sessionId 为空，不能提交（否则 session_id 落 NULL） */
+  ready: boolean;
   upsert: (p: TaskUpsert) => void;
   patch: (p: Partial<DraftForm>) => void;
   clearRefs: () => void;
@@ -60,6 +62,10 @@ export function useSubmissions(ctx: SubmissionContext) {
   };
 
   const submit = async () => {
+    if (!ctx.ready || !ctx.sessionId) {
+      ctx.setNotice("正在初始化，请稍候");
+      return;
+    }
     const provider = ctx.providers.find((p) => p.id === ctx.providerId);
     if (!provider) {
       ctx.setNotice("请先在「供应商」页添加并保存供应商");
@@ -141,6 +147,10 @@ export function useSubmissions(ctx: SubmissionContext) {
   };
 
   const importBatch = async () => {
+    if (!ctx.ready || !ctx.sessionId) {
+      ctx.setNotice("正在初始化，请稍候");
+      return;
+    }
     const provider = ctx.providers.find((p) => p.id === ctx.providerId);
     if (!provider) {
       ctx.setNotice("请先在「供应商」页添加并保存供应商");
@@ -194,6 +204,10 @@ export function useSubmissions(ctx: SubmissionContext) {
   };
 
   const retry = async (t: TaskView) => {
+    if (!ctx.ready || !ctx.sessionId) {
+      ctx.setNotice("正在初始化，请稍候");
+      return;
+    }
     if (!canRetry(t)) {
       ctx.setNotice("该任务缺少可重试的参数（供应商或提示词为空）");
       return;

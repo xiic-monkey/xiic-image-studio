@@ -5,6 +5,7 @@ import ProvidersView from "./views/ProvidersView";
 import WorkbenchView from "./views/WorkbenchView";
 import TrafficLights from "./components/TrafficLights";
 import { useNav, type Tab } from "./stores/nav";
+import Toast from "./ui/Toast";
 
 // 是否显示前端自绘红绿灯。
 // 当前关闭：窗口已恢复系统原生标题栏 + 系统红绿灯（见 tauri.conf.json 的 decorations:true）。
@@ -58,6 +59,7 @@ export default function App() {
         {tab === "tools" && <ToolsView />}
         {tab === "providers" && <ProvidersView />}
       </main>
+      <Toast />
     </div>
   );
 }

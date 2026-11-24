@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { toCanvasPoint } from "../lib/mask-geometry";
+import { btnGhostCls, btnPrimaryCls } from "../ui/controls";
 import type { RefImage } from "../types";
 
 interface Props {
@@ -105,8 +106,8 @@ export default function MaskEditor({ image, onDone, onClose }: Props) {
           <button className="text-xs text-neutral-500 hover:underline" onClick={clear}>清除涂抹</button>
         </div>
         <div className="mt-4 flex justify-end gap-2">
-          <button className="rounded-md px-4 py-2 text-sm text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800" onClick={() => { onDone(null); }}>取消</button>
-          <button className="rounded-md bg-orange-600 px-4 py-2 text-sm text-white hover:bg-orange-700" onClick={done}>完成</button>
+          <button className={btnGhostCls} onClick={() => { onDone(null); }}>取消</button>
+          <button className={btnPrimaryCls} onClick={done}>完成</button>
         </div>
       </div>
     </div>

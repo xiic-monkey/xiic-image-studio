@@ -33,6 +33,7 @@ dirs = "5"
 # API key 加密存储（AES-256-GCM + 机器绑定密钥派生）
 aes-gcm = "0.10"
 sha2 = "0.10"
+tauri-plugin-clipboard-manager = "2.5.0"
 
 [profile.release]
 strip = true

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../../ipc";
 import { errorMessage } from "../../lib/error";
+import { btnCompactCls, inputCompactCls } from "../../ui/controls";
 import type { PresetItem } from "../../types";
 
 interface Props {
@@ -68,14 +69,14 @@ export default function PresetPanel({ onApply, current, onNotice }: Props) {
 
       <div className="mb-2 flex gap-1.5">
         <input
-          className="min-w-0 flex-1 rounded-md border border-neutral-300 bg-white px-2 py-1 text-[11px] focus:border-orange-500 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100"
+          className={`${inputCompactCls} min-w-0 flex-1`}
           placeholder="把当前参数存为配方…"
           value={name}
           onChange={(e) => setName(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") void save(); }}
         />
         <button
-          className="shrink-0 rounded-md border border-neutral-300 px-2 py-1 text-[11px] text-neutral-600 hover:bg-neutral-100 disabled:opacity-40 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-800"
+          className={`${btnCompactCls} shrink-0`}
           onClick={() => void save()}
           disabled={!name.trim() || !current.prompt.trim()}
         >保存</button>

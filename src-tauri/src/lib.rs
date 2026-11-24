@@ -18,7 +18,7 @@ pub mod storage;
 use crate::error::AppResult;
 use gallery::{gallery_export_jsonl, image_delete, image_list, image_reveal, image_set_favorite};
 use generate::commands::{
-    generate_cancel, generate_submit, image_read_b64, mj_action, task_delete, task_list,
+    generate_cancel, generate_submit, image_copy, image_read_b64, mj_action, task_delete, task_list,
 };
 use generate::QueueState;
 use media::{
@@ -65,6 +65,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             let app_dir: PathBuf = app.path().app_data_dir().expect("无法获取应用数据目录");
             std::fs::create_dir_all(&app_dir)?;
@@ -148,6 +149,7 @@ pub fn run() {
             task_list,
             task_delete,
             image_read_b64,
+            image_copy,
             image_list,
             image_set_favorite,
             image_delete,

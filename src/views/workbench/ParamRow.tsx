@@ -104,7 +104,7 @@ export default function ParamRow({
         {scanMode && (
           <>
             <Select
-              className={`${selCls} w-20`}
+              className={`${selCls} w-20!`}
               value={String(scanCount)}
               onChange={(v) => onScanCount(Number(v))}
               ariaLabel="扫描张数"

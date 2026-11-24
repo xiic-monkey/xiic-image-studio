@@ -6,6 +6,16 @@ import { errorMessage } from "../lib/error";
 import { useModels } from "../stores/models";
 import { useProviders } from "../stores/providers";
 import {
+  btnCls,
+  btnGhostCls,
+  btnPrimaryCls,
+  btnRowCls,
+  btnRowDangerCls,
+  inputCls,
+  labelCls,
+  textareaCls,
+} from "../ui/controls";
+import {
   PROTOCOL_LABELS,
   type ModelDraft,
   type ModelItem,
@@ -172,10 +182,6 @@ export default function ProvidersView() {
     }
   };
 
-  const inputCls =
-    "w-full rounded-md border border-neutral-300 bg-white px-3 py-2 text-sm focus:border-orange-500 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100";
-  const labelCls = "mb-1 block text-xs font-medium text-neutral-500 dark:text-neutral-400";
-
   return (
     <div className="mx-auto max-w-3xl space-y-8 p-8">
       {notice && (
@@ -228,11 +234,11 @@ export default function ProvidersView() {
           </datalist>
           <div className="mt-3 flex justify-end gap-2">
             <button
-              className="rounded-md border border-neutral-300 px-4 py-2 text-sm text-neutral-700 hover:bg-neutral-100 disabled:opacity-40 dark:border-neutral-700 dark:text-neutral-200 dark:hover:bg-neutral-800"
+              className={btnCls}
               onClick={() => void discover()}
             >从供应商发现模型</button>
             <button
-              className="rounded-md bg-orange-600 px-4 py-2 text-sm text-white hover:bg-orange-700 disabled:opacity-50"
+              className={btnPrimaryCls}
               onClick={() => void addModel()}
               disabled={!modelName.trim()}
             >添加模型</button>
@@ -293,14 +299,14 @@ export default function ProvidersView() {
                 </div>
                 <div className="flex shrink-0 gap-1">
                   <button
-                    className="rounded-md px-3 py-1.5 text-sm text-neutral-600 hover:bg-neutral-100 dark:text-neutral-300 dark:hover:bg-neutral-800"
+                    className={btnRowCls}
                     onClick={() => {
                       setCapsEditingId(capsEditingId === m.id ? null : m.id);
                       setCapsDraft(m.capabilities_override ?? "");
                     }}
                   >能力</button>
                   <button
-                    className="rounded-md px-3 py-1.5 text-sm text-red-500 hover:bg-red-50 dark:hover:bg-red-950"
+                    className={btnRowDangerCls}
                     onClick={() => void deleteModel(m)}
                   >删除</button>
                 </div>
@@ -315,7 +321,7 @@ export default function ProvidersView() {
               能力覆写（JSON，可选）——中转站这类非标准模型用它改尺寸/质量取值
             </label>
             <textarea
-              className={`${inputCls} h-28 font-mono text-xs`}
+              className={`${textareaCls} h-28 font-mono text-xs`}
               value={capsDraft}
               onChange={(e) => setCapsDraft(e.target.value)}
               placeholder={'{"sizes":["1024x1024","768x1344"],"seed":true}'}
@@ -325,11 +331,11 @@ export default function ProvidersView() {
             </p>
             <div className="mt-2 flex justify-end gap-2">
               <button
-                className="rounded-md border border-neutral-300 px-3 py-1.5 text-sm text-neutral-600 hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-300"
+                className={btnGhostCls}
                 onClick={() => setCapsEditingId(null)}
               >取消</button>
               <button
-                className="rounded-md bg-orange-600 px-3 py-1.5 text-sm text-white hover:bg-orange-700"
+                className={btnPrimaryCls}
                 onClick={() => {
                   const m = models.find((x) => x.id === capsEditingId);
                   if (m) void saveCaps(m);
@@ -348,7 +354,7 @@ export default function ProvidersView() {
             <p className="mt-1 text-sm text-neutral-500">接入官方或任意中转站，Key 存本地数据库，不上传。</p>
           </div>
           <button
-            className="rounded-md bg-orange-600 px-4 py-2 text-sm text-white hover:bg-orange-700"
+            className={btnPrimaryCls}
             onClick={() => setEditing(null)}
           >+ 新增供应商</button>
         </div>
@@ -382,9 +388,9 @@ export default function ProvidersView() {
                     <p className="mt-1 truncate text-xs text-neutral-400">{p.base_url}</p>
                   </div>
                   <div className="flex shrink-0 gap-1">
-                    <button className="rounded-md px-3 py-1.5 text-sm text-neutral-600 hover:bg-neutral-100 dark:text-neutral-300 dark:hover:bg-neutral-800"
+                    <button className={btnRowCls}
                       onClick={() => setEditing(p)}>编辑</button>
-                    <button className="rounded-md px-3 py-1.5 text-sm text-red-500 hover:bg-red-50 dark:hover:bg-red-950"
+                    <button className={btnRowDangerCls}
                       onClick={() => { if (confirm(`删除供应商「${p.name}」？`)) remove(p.id); }}>删除</button>
                   </div>
                 </div>

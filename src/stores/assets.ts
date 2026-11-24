@@ -4,8 +4,8 @@ import type { RefImage } from "../types";
 
 interface AssetsState {
   refs: RefImage[];
-  /** 追加参考图，返回实际加入张数；满 4 张时剩余部分不静默丢失，由调用方提示。 */
-  addRefs: (imgs: RefImage[]) => number;
+  /** 追加参考图并去重，返回实际加入 / 重复张数；满 4 张时剩余部分不静默丢失。 */
+  addRefs: (imgs: RefImage[]) => { added: number; duplicates: number };
   removeRef: (index: number) => void;
   clearRefs: () => void;
 }
@@ -17,9 +17,9 @@ interface AssetsState {
 export const useAssets = create<AssetsState>((set, get) => ({
   refs: [],
   addRefs: (imgs) => {
-    const { refs, added } = appendRefs(get().refs, imgs);
+    const { refs, added, duplicates } = appendRefs(get().refs, imgs);
     if (added > 0) set({ refs });
-    return added;
+    return { added, duplicates };
   },
   removeRef: (index) => set((s) => ({ refs: s.refs.filter((_, i) => i !== index) })),
   clearRefs: () => set({ refs: [] }),

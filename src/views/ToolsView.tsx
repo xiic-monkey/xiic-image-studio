@@ -5,6 +5,7 @@ import { api } from "../ipc";
 import { errorMessage } from "../lib/error";
 import { dataUrlToRef } from "../lib/ref-image";
 import { useAssets } from "../stores/assets";
+import { btnCls, btnPrimaryCls, inputCls } from "../ui/controls";
 
 async function pickPaths(multiple: boolean, patterns: string[]): Promise<string[]> {
   const picked = await open({ multiple, filters: [{ name: "files", extensions: patterns }] });
@@ -86,13 +87,11 @@ export default function ToolsView() {
     const url = resultUrls[path];
     if (!url) return;
     // 只加参考图，不碰提示词：工作台里写到一半的文本不能被覆盖
-    const added = addRefs([dataUrlToRef(url, path.split("/").pop() ?? "ref.png")]);
+    const { added } = addRefs([dataUrlToRef(url, path.split("/").pop() ?? "ref.png")]);
     setNotice(added > 0 ? "已加入工作台参考图" : "参考图已满（最多 4 张）");
   };
 
   const cardCls = "rounded-xl border border-neutral-200 p-4 dark:border-neutral-800";
-  const btnCls = "rounded-md bg-orange-600 px-3 py-2 text-xs text-white hover:bg-orange-700 disabled:opacity-50";
-  const inputCls = "rounded-md border border-neutral-300 bg-white px-2 py-1.5 text-xs dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100";
 
   return (
     <div className="mx-auto max-w-3xl space-y-4 overflow-y-auto p-6">
@@ -111,7 +110,7 @@ export default function ToolsView() {
             onChange={(e) => setCustomPath(e.target.value)}
           />
           <button
-            className="rounded-md border border-neutral-300 px-3 py-1.5 text-xs hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800"
+            className={btnCls}
             onClick={async () => {
               try {
                 setStatus(await api.toolsSetFfmpegPath(customPath));
@@ -166,7 +165,7 @@ export default function ToolsView() {
               ...[512, 1024, 2048].map((s) => ({ value: String(s), label: `最长边 ${s}` })),
             ]}
           />
-          <button className={btnCls} disabled={busy || !status?.available}
+          <button className={btnPrimaryCls} disabled={busy || !status?.available}
             onClick={doConvert}>选择图片并转换</button>
         </div>
       </div>
@@ -178,7 +177,7 @@ export default function ToolsView() {
             帧率 {fps} fps
             <input type="range" min={1} max={20} value={fps} onChange={(e) => setFps(Number(e.target.value))} />
           </label>
-          <button className={btnCls} disabled={busy || !status?.available}
+          <button className={btnPrimaryCls} disabled={busy || !status?.available}
             onClick={doGif}>选择多张图片合成</button>
         </div>
       </div>
@@ -186,7 +185,7 @@ export default function ToolsView() {
       <div className={cardCls}>
         <h2 className="text-sm font-medium">视频抽帧（做参考图 / 垫图）</h2>
         <div className="mt-2 flex flex-wrap items-center gap-2">
-          <button className={btnCls} disabled={busy || !status?.available}
+          <button className={btnPrimaryCls} disabled={busy || !status?.available}
             onClick={doFrames}>选择视频并抽帧</button>
           <span className="text-xs text-neutral-400">每秒 1 帧，最多 16 帧</span>
         </div>

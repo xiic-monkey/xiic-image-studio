@@ -1,36 +1,40 @@
 import { useCallback, useEffect, useState } from "react";
 import Select from "../components/Select";
 import TaskPanel from "../components/TaskPanel";
+import { useAddAsRef } from "../hooks/useAddAsRef";
+import { useCopyImage } from "../hooks/useCopyImage";
 import { useDraft } from "../hooks/useDraft";
-import { useSessions } from "../hooks/useSessions";
 import { useSubmissions } from "../hooks/useSubmissions";
 import { useTaskFeed } from "../hooks/useTaskFeed";
+import { api } from "../ipc";
 import { normalizeQuality, normalizeSize } from "../lib/capabilities";
+import { errorMessage } from "../lib/error";
 import { filesToRefs } from "../lib/ref-image";
 import { pickPrefillPrompt } from "../lib/submission";
+import { pickSizeForRatio } from "../lib/template";
 import { useAssets } from "../stores/assets";
 import { useModels } from "../stores/models";
 import { usePrefill } from "../stores/prefill";
 import { useProviders } from "../stores/providers";
-import type { TemplateItem } from "../templates";
-import { PROTOCOL_LABELS, type PresetItem, type RefImage } from "../types";
+import { useToast } from "../stores/toast";
+import { PROTOCOL_LABELS, type ImageMeta, type PresetItem, type RefImage, type TaskView } from "../types";
 import MaskEditorLayer from "./workbench/MaskEditorLayer";
 import ParamRow from "./workbench/ParamRow";
 import PresetPanel from "./workbench/PresetPanel";
 import RefImages from "./workbench/RefImages";
-import SessionTabs from "./workbench/SessionTabs";
-import { inputCls, labelCls, selCls } from "./workbench/styles";
+import { labelCls, selCls, textareaCls } from "./workbench/styles";
 import SubmitBar from "./workbench/SubmitBar";
-import TemplatePanel from "./workbench/TemplatePanel";
+import TemplatePanel, { type TemplateApplyPayload } from "./workbench/TemplatePanel";
 
 /** 组合层：状态与副作用在 hooks，展示在各 workbench 子组件，这里只负责接线。 */
 export default function WorkbenchView() {
-  const [notice, setNotice] = useState<string | null>(null);
+  const showToast = useToast((s) => s.show);
+  // useSubmissions 里的 setNotice(null) 是清旧提示；toast 自动消失，空值直接忽略
+  const setNotice = (msg: string | null) => { if (msg) showToast(msg); };
   const { providers, load } = useProviders();
   const { models, load: loadModels } = useModels();
   const { tasks, imgUrls, upsert, cancel, remove } = useTaskFeed();
-  const { sessions, sessionId, selectSession, newSession, deleteSession, renameSession } = useSessions(setNotice);
-  const { form, setForm, patch } = useDraft(sessionId, sessions);
+  const { form, setForm, patch, sessionId, ready } = useDraft();
 
   const { refs, addRefs, removeRef: removeAssetRef, clearRefs: clearAssetRefs } = useAssets();
   const [mask, setMask] = useState<RefImage | null>(null);
@@ -54,13 +58,33 @@ export default function WorkbenchView() {
     refs,
     mask,
     sessionId,
+    ready,
     upsert,
     patch,
     clearRefs: () => { clearAssetRefs(); setMask(null); },
     setNotice,
   });
   const prefill = usePrefill((s) => s.prefill);
+  const sendPrefill = usePrefill((s) => s.send);
   const clearPrefill = usePrefill((s) => s.clear);
+
+  const addRefsForTask = useAddAsRef(setNotice);
+  const addTaskImagesAsRef = (imgs: ImageMeta[]) => {
+    void addRefsForTask(imgs.map((i) => ({ path: i.path, id: i.id })));
+  };
+  const copyImage = useCopyImage(setNotice);
+  const revealTaskImage = (img: ImageMeta) => {
+    void api.imageReveal(img.id).catch((e) => setNotice(errorMessage(e)));
+  };
+  // 与画廊一致：先加参考图，满 4 张时不动提示词；没图片的任务仍可只回填参数继续生成
+  const continueTask = async (t: TaskView) => {
+    if (t.images.length > 0) {
+      const { added, duplicates } = await addRefsForTask(t.images.map((i) => ({ path: i.path, id: i.id })));
+      // 图已在参考里（重复）也要回填参数；只有真满额才不动用户的提示词
+      if (added === 0 && duplicates === 0) return;
+    }
+    sendPrefill({ prompt: t.prompt, size: t.size ?? undefined, quality: t.quality ?? undefined });
+  };
 
   useEffect(() => {
     void load();
@@ -90,7 +114,8 @@ export default function WorkbenchView() {
 
   // ---- 画廊/提示词回填 ----
   useEffect(() => {
-    if (!prefill) return;
+    // 等草稿加载完再回填：画廊「继续生成」切回工作台时，异步灌草稿会覆盖刚回填的 prompt
+    if (!prefill || !ready) return;
     setForm((prev) => ({ ...prev, prompt: pickPrefillPrompt(prev.prompt, prefill.prompt) }));
     if (prefill.size) patch({ size: prefill.size });
     if (prefill.quality) patch({ quality: prefill.quality });
@@ -99,7 +124,7 @@ export default function WorkbenchView() {
     // 用完即弃：工作台随 tab 卸载，不清掉的话下次挂载会再把旧回填灌一遍，
     // 把用户在此期间改过的提示词覆盖回去。
     clearPrefill();
-  }, [prefill, setForm, patch, clearPrefill]);
+  }, [prefill, ready, setForm, patch, clearPrefill]);
 
   const addFiles = useCallback(async (files: FileList | File[]) => {
     addRefs(await filesToRefs(files));
@@ -120,11 +145,25 @@ export default function WorkbenchView() {
     if (i === 0) setMask(null);
   };
 
-  const pickTemplate = (t: TemplateItem) => {
-    setForm((prev) => ({ ...prev, prompt: prev.prompt ? `${prev.prompt}\n${t.prompt}` : t.prompt }));
-    if (t.size) patch({ size: t.size });
-    if (t.quality) patch({ quality: t.quality });
+  // 套用模板：面板已经把字段拼成提示词，这里只负责落到提示词框与参数上。
+  // 尺寸不直接照抄模板——按当前模型的能力表挑最接近的比例对应值，
+  // 换供应商/模型也不会发出上游不认的尺寸。
+  const applyTemplate = (payload: TemplateApplyPayload) => {
+    let prompt = payload.prompt;
+    // MJ 的比例只能走提示词参数（协议不收 size 字段）。
+    if (payload.ratio && selectedModel?.protocol === "midjourney_proxy") {
+      prompt = `${prompt} --ar ${payload.ratio}`;
+    }
+    setForm((prev) => ({
+      ...prev,
+      prompt: payload.replace ? prompt : prev.prompt ? `${prev.prompt}\n${prompt}` : prompt,
+    }));
+    const size = payload.ratio ? pickSizeForRatio(caps?.sizes, payload.ratio) : undefined;
+    if (size) patch({ size });
     setTplOpen(false);
+    setNotice(
+      `已插入模板「${payload.title}」${size ? `，尺寸 ${size}` : ""}`,
+    );
   };
 
   // 套用配方：提示词整条替换，参数一并带上。
@@ -145,8 +184,9 @@ export default function WorkbenchView() {
   };
 
   return (
-    <div className="flex h-full">
-      {/* 左：参数区 */}
+    <>
+      <div className="flex h-full">
+        {/* 左：参数区 */}
       <div
         className="w-[380px] shrink-0 space-y-4 overflow-y-auto border-r border-neutral-200 px-5 pb-5 pt-3.5 dark:border-neutral-800"
         onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
@@ -154,15 +194,6 @@ export default function WorkbenchView() {
         onDrop={(e) => { e.preventDefault(); setDragOver(false); void addFiles(e.dataTransfer.files); }}
       >
         <h1 className="text-base font-medium leading-6">工作台</h1>
-
-        <SessionTabs
-          sessions={sessions}
-          sessionId={sessionId}
-          onSelect={selectSession}
-          onNew={newSession}
-          onDelete={deleteSession}
-          onRename={renameSession}
-        />
 
         <div className="grid grid-cols-2 gap-3">
           <div>
@@ -214,7 +245,7 @@ export default function WorkbenchView() {
             >{`按行批量 ${form.batchMode ? "开" : "关"}`}</button>
           </div>
           <textarea
-            className={`${inputCls} min-h-[120px] resize-y`}
+            className={`${textareaCls} min-h-[120px] resize-y`}
             value={form.prompt}
             onChange={(e) => patch({ prompt: e.target.value })}
             placeholder={form.batchMode ? "一行一个提示词，每行提交一个任务" : "描述你想要的画面…（换行不会拆成多个任务）"}
@@ -251,12 +282,6 @@ export default function WorkbenchView() {
           onScanCount={(v) => patch({ scanCount: v })}
         />
 
-        {notice && (
-          <div className="rounded-md bg-blue-50 px-3 py-2 text-xs text-blue-700 dark:bg-blue-950 dark:text-blue-400">
-            {notice}
-          </div>
-        )}
-
         <SubmitBar
           submitting={submitting}
           tplOpen={tplOpen}
@@ -267,7 +292,6 @@ export default function WorkbenchView() {
           onSubmit={() => void submit()}
         />
 
-        {tplOpen && <TemplatePanel onPick={pickTemplate} onClose={() => setTplOpen(false)} />}
         {presetOpen && (
           <PresetPanel
             onApply={applyPreset}
@@ -289,7 +313,17 @@ export default function WorkbenchView() {
         <div className="sticky top-0 z-10 border-b border-neutral-200 bg-white/90 px-5 py-3 text-sm font-medium backdrop-blur dark:border-neutral-800 dark:bg-neutral-950/90">
           任务队列
         </div>
-        <TaskPanel tasks={tasks} imgUrls={imgUrls} onCancel={cancel} onDelete={remove} onRetry={retry} />
+        <TaskPanel
+          tasks={tasks}
+          imgUrls={imgUrls}
+          onCancel={cancel}
+          onDelete={remove}
+          onRetry={retry}
+          onAddRefs={addTaskImagesAsRef}
+          onContinue={(t) => void continueTask(t)}
+          onCopy={(img) => void copyImage(img.path)}
+          onReveal={revealTaskImage}
+        />
       </div>
 
       {maskEditing && (
@@ -299,6 +333,16 @@ export default function WorkbenchView() {
           onClose={() => setMaskEditing(false)}
         />
       )}
-    </div>
+      </div>
+
+      {/* 模板面板是整屏模态，挂在最外层避免被参数区的 overflow 裁掉 */}
+      {tplOpen && (
+        <TemplatePanel
+          onApply={applyTemplate}
+          onClose={() => setTplOpen(false)}
+          onNotice={setNotice}
+        />
+      )}
+    </>
   );
 }

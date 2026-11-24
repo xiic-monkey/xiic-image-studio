@@ -76,7 +76,7 @@ ProviderConfig {
 3. **图生图**：参考图（多图）上传、拖拽/粘贴/画廊选图
 4. **任务队列**：提交→排队→并发执行→重试→取消，实时进度，失败原因落库
 5. **本地图廊**：缩略墙、搜索（prompt/模型/日期）、收藏、批量导出、预览（滚轮缩放/平移/左右切换）、**参数回填**（点一张图恢复全部生成参数）
-6. **多会话工作台**：会话级草稿（prompt、模型、参数自动保存）
+6. **单会话工作台**：草稿自动保存（prompt、模型、参数）；任务队列与画廊共用「加入参考图 / 继续生成 / 复制图片 / 在 Finder 打开」右键菜单
 7. **提示词库**：模板 CRUD、检索、一键套用
 
 ### Phase 2（M4+，已实现）
@@ -89,7 +89,9 @@ ProviderConfig {
     CSV 走标准引号规则（引号内的逗号不算分隔符、`""` 是转义），纯文本整行即一条提示词。
 11. **MJ 扩展操作**：U/V 放大变换按钮（走 `pipeline::prepare_task` + `spawn_task`，与 GUI 生成同链路：
     有进度、可取消、受全局并发闸门约束；`out.meta.mj_task_id` 保留链式 U/V）
-12. **预设模板库**：内置电商/头像/插画/摄影四类场景模板，工作台「模板」按钮插入（追加到提示词，可选带 size/quality）
+12. **提示词模板库**：工作台「模板」按钮打开模态模板库，左栏按分类挑模板、右栏填字段并实时预览合成结果。
+    内置 49 个模板、7 大类（角色设计 / 人物摄影 / 电商产品 / 插画风格 / 场景分镜 / 设计品牌 / 社媒物料），
+    结构按业内标准工作流编排（详见 §6.1）。
 
 ### Phase 3（M5+，已实现）
 13. **CLI 无头模式**：`xiic-image-studio generate|providers|export`（不占端口、非常驻），对外暴露
@@ -121,7 +123,8 @@ ProviderConfig {
   各生成一张，任务 `total=n`。上限由 `MAX_N=8` 统一裁剪（GUI 与 CLI 共用同一上限）。
 - **重试**：仅 `ref_count==0` 且状态为 `failed` / `canceled` / `completed_with_errors` 的任务提供重试入口；
   图生图因参考图未入库，重试会退化，前端据此隐藏入口。重试经 `retryRequest` 复现
-  `size` / `quality` / `seed` / `n` 与原会话归属（`session_id`），旧数据无归属时回落到当前会话。
+  `size` / `quality` / `seed` / `n` 与任务归属（`session_id` 仅作归属信息、不作可见性过滤），
+  旧数据无归属时回落到当前草稿会话。
 - **能力表（协议 × 模型）**：`for_model(protocol, model)` 推导该组合实际接受的参数
   （尺寸取值 / 质量取值 / 是否支持 seed、参考图、蒙版 / 上游端点形态）。
   适配器据此发参，GUI 与 CLI 提交入口据此裁剪请求，前端据此收敛控件并把不支持项置灰。
@@ -166,6 +169,60 @@ ProviderConfig {
 无头模式与 GUI 是「两个进程、同一张库、同一个 images 目录」：
   xiic-image-studio generate  ←→  SQLite  ←→  GUI（前端轮询发现新任务）
 ```
+
+### 6.1 提示词模板体系
+
+模板不是「一段固定提示词」，而是**结构 + 槽位**：选模板 → 填字段 → 合成提示词 → 插入工作台。
+
+```
+PromptTemplate {
+  id / title / category / summary
+  fields: [{ key, label, hint, default, required, multiline }]   // 槽位
+  prompt: "…{{character}}…{{style}}…"                            // 骨架
+  ratio?: "16:9"                                                 // 建议比例（不写死像素）
+  steps?: [{ title, prompt, note }]                              // 分步工作流
+  needsRef?: boolean                                             // 是否建议配合参考图
+}
+```
+
+合成规则（`src/lib/template.ts`，纯函数 + 单测）：
+
+- **必填校验**：必填槽位没填不给插入，界面直接标出「还差：角色形象」。
+- **空槽整段省略**：可选槽位留空时，「附加：。」这类残渣整句丢掉，提示词里不留脏标点。
+- **比例落地**：模板只声明 `ratio`，`pickSizeForRatio` 按当前模型能力表挑最接近的合法尺寸
+  （16:9 → 1536x1024 这类），换供应商/模型也不会发出上游不认的 size；MJ 协议没有 size 字段，
+  改为在提示词尾部追加 `--ar 16:9`。
+
+内置模板按业内标准工作流编排（参考 PixAI 角色设定指南、PromptMake turnaround 手册、
+Apatero 三视图指南、Google 官方生图最佳实践、Midjourney `--cref/--cw` 用法）：
+
+| 分类 | 模板 |
+|---|---|
+| 角色设计 | 定案立绘 / 三视图 / 短剧设定图 / 四视图 / 单视角 / 表情差分 / 服装设定 / 配色卡 / 道具设定 / 场景延展 / 资产全套工作流 |
+| 人物摄影 | 写实特写 / 全身人像 / 杂志大片 / 街头纪实 / 证件照 / 宠物写真 |
+| 电商产品 | 白底主图 / 场景带货 / 模特上身 / 细节特写 / 美食摄影 |
+| 插画风格 | 二次元立绘 / 扁平插画 / 水彩绘本 / 游戏概念 / 动画电影 / 3D 动画 / 粘土定格 / 盲盒潮玩 / 像素 / 等距微缩 / 铅笔素描 / 赛博朋克 |
+| 场景分镜 | 场景概念 / 分镜故事板 / 影视主视觉 / 室内效果图 / 建筑外观 |
+| 设计品牌 | Logo / 海报 / UI 界面稿 / 包装设计 / 印花周边 / 专辑封面 |
+| 社媒物料 | 小红书封面 / 视频缩略图 / 手机壁纸 / 贴纸包 |
+
+模板面板的版式是「筛选条 + 内容区」：顶栏（标题/关闭）→ 整行搜索 → 整条分类标签
+（横向滚动、每个标签带模板数）→ 左列表 / 右详情。搜索跨分类，搜索时分类高亮收回到「全部」；
+「全部」视图下左列表按分类分组显示组头，选定分类后组头隐藏。分类标签不再塞进左栏，
+模板变多后左栏只承担列表，不重复承担导航。
+
+在线模板库调研（2026-11）：生图领域没有统一的模板开放协议或稳定 API。GitHub 上有
+AI-Visual-Prompt-Cookbook（MIT，约 150 个 style.json）、awesome-gpt-image-2（MIT，544 个
+逆向案例）、BoltPrompt（8000+ 条、可自部署）等 JSON 数据集，但 schema 各自为政、无法直接对接，
+因此当前以内置模板为主，不接远程源。
+
+三视图类模板写死业内三条硬约束：**冻结姿势**（A-pose，无动作、无透视缩短）、
+**压平光线**（均匀平光，保证服装结构可读）、**锁定比例**（头身比 + 头顶/下巴/肩/腰/膝同一条水平基准线）；
+正侧面写「只露一只眼睛」、背面写「不露脸」，这是三视图最容易崩的两个点。
+
+短剧 / AI 漫剧用另一套通行版式（`char-drama-sheet`）：**面部特写 + 正/侧/背三张全身站立**，
+共四格横排——特写格锁五官辨识度，三张全身保形体与服装一致。与动画/游戏的三格 turnaround
+不是一回事，因此单独出一条模板，原三视图模板保留给需要纯 turnaround 的场景。
 
 ## 7. 数据模型（SQLite）
 
@@ -234,16 +291,19 @@ xiic-image-studio/
 ├── src/lib/protocols.ts           # 协议常量 + 供应商模板（后端加协议要同步这里）
 ├── src/
 │   ├── views/{Workbench,Gallery,Providers,Prompts,Tools}View.tsx
-│   ├── views/workbench/{SessionTabs,SessionContextMenu,RefImages,ParamRow,
-│   │       SubmitBar,TemplatePanel,PresetPanel,MaskEditorLayer,styles}.tsx/.ts  # 工作台展示层
-│   ├── hooks/{useTaskFeed,useSessions,useDraft,useSubmissions}.ts  # 轮询/会话/草稿/提交副作用
+│   ├── views/workbench/{RefImages,ParamRow,SubmitBar,TemplatePanel,PresetPanel,
+│   │       MaskEditorLayer,styles}.tsx/.ts  # 工作台展示层
+│   ├── hooks/{useTaskFeed,useDraft,useSubmissions,useAddAsRef}.ts  # 轮询/草稿/提交/加参考图副作用
 │   ├── components/{TaskPanel,MaskEditor,ProviderForm,Select,TrafficLights}.tsx
+│   ├── ui/controls.ts               # 全局控件规格：单行控件统一 30px，字号分常规/紧凑两档
+│   ├── ui/ContextMenu.tsx           # 画廊与任务队列共用的右键菜单
 │   ├── stores/{prefill,providers,models}.ts
 │   ├── lib/{submission,request,draft,retry,task-signature,mask-geometry,
-│   │       capabilities,batch-parse,ref-image}.ts + 同名 .test.ts
+│   │       capabilities,batch-parse,ref-image,template}.ts + 同名 .test.ts
 │   │       # 纯函数：提交语义 / 请求组装 / 草稿指纹 / 重试 / 列表指纹 / 蒙版几何 /
-│   │       # 能力收敛 / 批量解析 / 参考图转换，node --test
-│   ├── templates.ts               # 预设模板库
+│   │       # 能力收敛 / 批量解析 / 参考图转换 / 模板合成，node --test
+│   ├── templates/                   # 内置提示词模板库（按分类分文件 + index 汇总）
+│   │   ├── {index,character,portrait,commerce,illustration,scene,design}.ts
 │   └── ipc.ts / types.ts
 ├── src-tauri/examples/{gen_icon,migrate_db}.rs  # 不依赖 GUI 的出图自检 / 库结构迁移
 └── scripts/fetch-ffmpeg.sh        # 打包前拉 ffmpeg sidecar（GitHub Release tag ffmpeg-v1）
@@ -255,7 +315,7 @@ xiic-image-studio/
 |---|---|---|
 | **M1 骨架** | Tauri 工程 + SQLite + 布局 + Provider 管理（四协议 + 测试 + 发现） | 能配通一个中转站 |
 | **M2 生图核心** | 文生图/图生图 + 任务队列 + 本地落盘 | 中转站真实出图 |
-| **M3 画廊与工作流** | 画廊/搜索/收藏/参数回填 + 多会话 + 提示词库 | 完整日常可用 |
+| **M3 画廊与工作流** | 画廊/搜索/收藏/参数回填 + 继续生成/加入参考图 + 提示词库 | 完整日常可用 |
 | **M4 进阶** | 蒙版重绘 + ffmpeg 工具箱 + 批量任务 + MJ U/V | 功能齐（批量为显式开关；文件导入按扩展名判格式，CSV 支持引号字段） |
 | **M5 无头 CLI** | `generate` / `providers` 子命令，对外 `--prompt` / `--ref` / `--json` | 外部 agent 能驱动生图（含以图生图）、结果进同一画廊 |
 | **M6 统一编排层** | `pipeline.rs` 收编 GUI / CLI / MJ 三条链路；接通 `session_id`；拆工作台、修轮询与草稿竞态；工程化收尾（fmt / clippy / CI / CSP） | 三条入口共用一套建任务与执行语义，`cargo test --lib` / `npm test` / `npm run build` 全绿 |
@@ -332,17 +392,23 @@ xiic-image-studio/
   把「按协议出图」与「MJ action 出图」收成同一个枚举，重试判定也跟着走同一条规则。
 - **接通 `session_id` 但不过滤**：`tasks.session_id` 以前恒为 NULL（死列）。现在 GUI /
   MJ 写真实会话、CLI 写 NULL，删会话靠外键置 NULL；`task_list` 仍返回全部任务，
-  否则 CLI 任务与历史任务会从工作台消失。会话归属是「归属信息」，不是「可见性开关」。
+  否则 CLI 任务与历史任务会从工作台消失。归属信息不是「可见性开关」；前端收敛为单会话后，
+  sessions 表继续作为唯一草稿槽，历史会话记录留在库里以保住老任务的归属。
 - **CLI 的静默进度与跨进程闸门是有意差异**：无头进程没有 `AppHandle`，也和 GUI
   不共享进程内 Semaphore，强行对齐只会引入假象。能对齐的（参数裁剪、建任务、出图、
   落盘、落库、状态收尾）已经全部对齐。
 - **草稿用内容指纹而不是单布尔开关**：`skipSave` 那种一次性布尔会被任何一次无关
-  重渲染消费掉，切会话时会把上个会话的草稿写进新会话。现在 `useDraft` 以
-  「已落库内容指纹」为基线，切会话先 flush 上个会话、再灌入新会话草稿，
-  组件卸载时也 flush，丢不掉最后 800ms 的编辑。
+  重渲染消费掉。现在 `useDraft` 以「已落库内容指纹」为基线做 debounce 保存，
+  组件卸载时也 flush，丢不掉最后 800ms 的编辑。单会话下只加载一次草稿；
+  `ready` 门控提交与画廊回填，避免 session_id 落 NULL 或异步灌草稿冲掉回填的提示词。
 - **前端只在展示层回落能力，不改草稿**：切换供应商后尺寸/质量可能不在新能力表内，
-  把回落值写回表单会在切会话那一轮覆盖新会话草稿；提交时 `buildGenerateRequest`
+  把回落值写回表单会在加载草稿那一轮覆盖已保存的值；提交时 `buildGenerateRequest`
   统一归一化即可，上游拿到的值始终合法。
+- **控件高度全局统一 30px**：以前每个页面各写一份 `inputCls`，靠 `py-1.5` / `py-2` 撑高度，
+  结果模型库 36px、工具箱 28px、工作台 30px 混着来，跨页并排看明显不协调。
+  现在统一收口到 `src/ui/controls.ts`：单行控件（输入框 / 下拉 / 按钮）一律 `h-[30px]`，
+  高度不再随字号变化；字号只分两档（常规 `text-sm`、密集区 `text-xs`），
+  多行控件只统一边框与内边距。页面不要再自己拼 `inputCls`，要改就改那一处。
 
 ## 12. 待办 / 已知限制
 

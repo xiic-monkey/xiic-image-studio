@@ -46,3 +46,34 @@ test("满了再加返回 0，原内容不变", () => {
   assert.equal(r.added, 0);
   assert.deepEqual(r.refs, full);
 });
+
+test("dataUrlToRef 带 id 时保留来源标识", () => {
+  assert.deepEqual(dataUrlToRef("data:image/png;base64,AAAA", "a.png", "img-1"), {
+    name: "a.png",
+    mime: "image/png",
+    data: "AAAA",
+    id: "img-1",
+  });
+});
+
+const mkId = (id: string) => dataUrlToRef(`data:image/png;base64,${id}`, `${id}.png`, id);
+
+test("appendRefs 按来源 id 去重，重复项不占名额", () => {
+  const r = appendRefs([mkId("1")], [mkId("1"), mkId("2")]);
+  assert.equal(r.added, 1);
+  assert.equal(r.duplicates, 1);
+  assert.deepEqual(r.refs.map((x) => x.id), ["1", "2"]);
+});
+
+test("appendRefs 无 id 时按 base64 内容去重，不算 hash", () => {
+  const r = appendRefs([mk("a")], [mk("a"), mk("b")]);
+  assert.equal(r.added, 1);
+  assert.equal(r.duplicates, 1);
+  assert.deepEqual(r.refs.map((x) => x.name), ["a", "b"]);
+});
+
+test("全部重复时 added 为 0 且能区分于满额", () => {
+  const r = appendRefs([mkId("1")], [mkId("1")]);
+  assert.equal(r.added, 0);
+  assert.equal(r.duplicates, 1);
+});
