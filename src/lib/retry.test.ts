@@ -11,6 +11,7 @@ const task: RetryableTask = {
   quality: "high",
   seed: 42,
   refCount: 0,
+  refPaths: [],
   sessionId: "s1",
 };
 
@@ -18,8 +19,13 @@ test("running 状态不可重试", () => {
   assert.equal(canRetry({ ...task, status: "running" }), false);
 });
 
-test("图生图任务（refCount>0）不可重试", () => {
+test("旧图生图任务（没有参考图快照）不可重试", () => {
   assert.equal(canRetry({ ...task, refCount: 1 }), false);
+  assert.equal(canRetry({ ...task, refCount: 1, refPaths: [] }), false);
+});
+
+test("有参考图快照的图生图任务可重试", () => {
+  assert.equal(canRetry({ ...task, refCount: 1, refPaths: [".refs/a/0.png"] }), true);
 });
 
 test("空 prompt 或无供应商不可重试", () => {
@@ -43,6 +49,16 @@ test("retryRequest 保留 seed / size / quality / n / sessionId", () => {
   assert.equal(req.n, 3);
   assert.equal(req.session_id, "s1");
   assert.deepEqual(req.refs, []);
+});
+
+test("retryRequest 带上参考图快照复现图生图", () => {
+  const refs = [
+    { name: "ref-1", mime: "image/png", data: "AAAA" },
+    { name: "ref-2", mime: "image/jpeg", data: "BBBB" },
+  ];
+  const req = retryRequest({ ...task, refCount: 2, refPaths: ["a", "b"] }, "current-session", undefined, refs);
+  assert.deepEqual(req.refs, refs);
+  assert.equal(req.refs.length, 2, "重试必须带回全部参考图，不能退化成文生图");
 });
 
 test("旧任务无归属时回落到当前会话", () => {

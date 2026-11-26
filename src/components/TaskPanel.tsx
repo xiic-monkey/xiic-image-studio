@@ -104,8 +104,8 @@ export default function TaskPanel({
                     取消
                   </button>
                 )}
-                {/* refCount > 0 是图生图：我们没存参考图本体，重试会退化成文生图，
-                    宁可不给入口，也不要给一个结果不一样的"重试" */}
+                {/* 图生图只要存了参考图快照（refPaths 非空）也能原样重试；
+                    canRetry 会挡住旧任务里没快照的那批，避免退化成文生图 */}
                 {!active && canRetry(t) && (
                   <button className="text-[11px] text-orange-600 hover:underline" onClick={() => onRetry(t)}>
                     重试

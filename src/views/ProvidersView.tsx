@@ -5,6 +5,7 @@ import { api } from "../ipc";
 import { errorMessage } from "../lib/error";
 import { useModels } from "../stores/models";
 import { useProviders } from "../stores/providers";
+import { confirmDelete } from "../ui/dialogs";
 import {
   btnCls,
   btnGhostCls,
@@ -173,7 +174,7 @@ export default function ProvidersView() {
   };
 
   const deleteModel = async (m: ModelItem) => {
-    if (!confirm(`删除模型「${m.label || m.model_name}」？会从所有供应商解绑。`)) return;
+    if (!(await confirmDelete(`删除模型「${m.label || m.model_name}」？会从所有供应商解绑。`))) return;
     try {
       await api.modelDelete(m.id);
       await Promise.all([loadModels(), load()]);
@@ -365,7 +366,7 @@ export default function ProvidersView() {
           <div className="rounded-xl border border-dashed border-neutral-300 p-10 text-center dark:border-neutral-700">
             <p className="text-sm text-neutral-500">还没有供应商配置</p>
             <p className="mt-1 text-xs text-neutral-400">
-              支持 OpenAI Images / Chat 生图 / Gemini 原生 / MJ Proxy / 火山方舟 / 阿里百炼 六种协议
+              支持 {Object.keys(PROTOCOL_LABELS).length} 种协议（OpenAI Images / Chat 生图 / Gemini / MJ Proxy / 火山方舟 / 百炼 / Stability / Ideogram / FLUX / MiniMax），选模板即可一键配置
             </p>
           </div>
         )}
@@ -391,7 +392,7 @@ export default function ProvidersView() {
                     <button className={btnRowCls}
                       onClick={() => setEditing(p)}>编辑</button>
                     <button className={btnRowDangerCls}
-                      onClick={() => { if (confirm(`删除供应商「${p.name}」？`)) remove(p.id); }}>删除</button>
+                      onClick={async () => { if (await confirmDelete(`删除供应商「${p.name}」？`)) remove(p.id); }}>删除</button>
                   </div>
                 </div>
 

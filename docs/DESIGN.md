@@ -1,6 +1,6 @@
 # xiic-image-studio 设计文档
 
-> 版本 v0.5 · 2026-11-22 · 状态：MVP + Phase 2 主要功能已实现（含 CLI 无头模式、GUI/CLI/MJ 统一编排层、画廊导出与种子扫描）
+> 版本 v0.6 · 2026-11-26 · 状态：MVP + Phase 2 主要功能已实现（含 CLI 无头模式、GUI/CLI/MJ 统一编排层、画廊批量操作与打包导出、图生图可重试）
 
 ## 1. 定位
 
@@ -75,7 +75,7 @@ ProviderConfig {
 2. **文生图**：prompt/负向词、尺寸预设+自定义、质量、n 张并发、seed
 3. **图生图**：参考图（多图）上传、拖拽/粘贴/画廊选图
 4. **任务队列**：提交→排队→并发执行→重试→取消，实时进度，失败原因落库
-5. **本地图廊**：缩略墙、搜索（prompt/模型/日期）、收藏、批量导出、预览（滚轮缩放/平移/左右切换）、**参数回填**（点一张图恢复全部生成参数）
+5. **本地图廊**：缩略墙、搜索（prompt/模型/模型筛选）、收藏、**批量选择**（并排对比 / 批量收藏 / 批量淘汰）、**批量导出**（JSONL 记录 / 打包 zip：图片本体 + 记录 + 数据库快照 + 供应商配置）、预览（滚轮缩放/平移/左右切换）、**参数回填**（点一张图恢复全部生成参数）
 6. **单会话工作台**：草稿自动保存（prompt、模型、参数）；任务队列与画廊共用「加入参考图 / 继续生成 / 复制图片 / 在 Finder 打开」右键菜单
 7. **提示词库**：模板 CRUD、检索、一键套用
 
@@ -121,10 +121,13 @@ ProviderConfig {
 - **seed（随机种子）**：由「协议 × 模型能力表」（`src-tauri/src/capabilities.rs`）决定是否下发。openai_chat_image 走请求体顶层（Chat Completions 标准参数）；gemini_native 走 `generationConfig.seed`；**openai_images 不下发**（Images API 规范里没有该字段，官方与转 OpenAI 的中转站都会 400）。上游不支持时静默忽略，不影响其他参数。
 - **n（数量）**：前端「数量」选择器 → `pipeline::execute` 按 `0..n` 并发 `buffer_unordered(FANOUT=4)`
   各生成一张，任务 `total=n`。上限由 `MAX_N=8` 统一裁剪（GUI 与 CLI 共用同一上限）。
-- **重试**：仅 `ref_count==0` 且状态为 `failed` / `canceled` / `completed_with_errors` 的任务提供重试入口；
-  图生图因参考图未入库，重试会退化，前端据此隐藏入口。重试经 `retryRequest` 复现
-  `size` / `quality` / `seed` / `n` 与任务归属（`session_id` 仅作归属信息、不作可见性过滤），
-  旧数据无归属时回落到当前草稿会话。
+- **重试**：状态为 `failed` / `canceled` / `completed_with_errors` 的任务提供重试入口。
+  图生图提交时把参考图快照落盘到 `images/.refs/<uuid>/`，`request_json` 只记相对路径；
+  重试时读回原图复现，不会退化成文生图。旧任务的图生图没有快照，仍不给入口。
+  快照是任务独占的临时文件：删任务时按 `request_json.ref_paths` 清掉对应 `.refs/<uuid>` 目录
+  （图片本体不动），启动时再扫一遍没有任何任务引用的孤儿目录（跳过刚写入的，避免误删并发 CLI 正在提交的快照）。
+  重试经 `retryRequest` 复现 `size` / `quality` / `seed` / `n` / 参考图与任务归属
+  （`session_id` 仅作归属信息、不作可见性过滤），旧数据无归属时回落到当前草稿会话。
 - **能力表（协议 × 模型）**：`for_model(protocol, model)` 推导该组合实际接受的参数
   （尺寸取值 / 质量取值 / 是否支持 seed、参考图、蒙版 / 上游端点形态）。
   适配器据此发参，GUI 与 CLI 提交入口据此裁剪请求，前端据此收敛控件并把不支持项置灰。
@@ -220,9 +223,12 @@ AI-Visual-Prompt-Cookbook（MIT，约 150 个 style.json）、awesome-gpt-image-
 **压平光线**（均匀平光，保证服装结构可读）、**锁定比例**（头身比 + 头顶/下巴/肩/腰/膝同一条水平基准线）；
 正侧面写「只露一只眼睛」、背面写「不露脸」，这是三视图最容易崩的两个点。
 
-短剧 / AI 漫剧用另一套通行版式（`char-drama-sheet`）：**面部特写 + 正/侧/背三张全身站立**，
-共四格横排——特写格锁五官辨识度，三张全身保形体与服装一致。与动画/游戏的三格 turnaround
-不是一回事，因此单独出一条模板，原三视图模板保留给需要纯 turnaround 的场景。
+短剧 / AI 漫剧按 **LibTV 标准**（`char-drama-sheet`）：横向宽幅，**最左 1/3 是超大面部特写**，
+**右 2/3 放正视图 / 侧视图 / 后视图三张全身**，二八身材比例（1:8 头身），纯色无缝背景。
+不是四格等分、也不是「正侧只露一只眼」的动画 turnaround。固定禁止项：无道具、无其他人物、
+无文字，100% 匹配同一角色，禁止五官漂移 / 畸形 / 歪斜 / 过度磨皮 / 透视变形。
+因纯文字直出常脸崩，模板自带两步工作流：先上传脸模 + 服装图垫出定妆照，再用定妆照当参考图
+生成三视图。动画/游戏的三格 turnaround 仍由 `char-turnaround-3` 保留。
 
 ## 7. 数据模型（SQLite）
 
@@ -255,14 +261,16 @@ meta            (key, value)  -- 迁移标记（provider_models_migrated）
 - 外键是真声明的（不是只开 `PRAGMA foreign_keys`）：`tasks.session_id` → `sessions(id)`、
   `images.task_id` → `tasks(id)`，都是 `ON DELETE SET NULL`。
   删任务/删会话**不删**图片与任务本身——画廊里的图不该因为清任务队列就没了，
-  只是不再声称自己属于某个已删的任务。
+  只是不再声称自己属于某个已删的任务。删任务会清掉该任务独有的参考图快照
+  （`images/.refs/<uuid>/`），因为重试入口随任务一起消失，留着只占磁盘。
 - `tasks.session_id` **真实写入**：GUI 提交与 MJ U/V（继承父任务）带当前会话 id，
   `pipeline::prepare_task` 把它交给 `create_task` 落库；CLI 与外部 examples 传 `NULL`。
   删会话后该列被 `ON DELETE SET NULL` 清空，任务仍在。`task_list` **不按 session_id 过滤**——
   否则 CLI 任务与历史任务会从工作台消失。`TaskItem` 同时回传 `session_id` / `seed`，
   一键重试据此复现原会话归属与随机种子。
-- `request_json` 由 `build_request_json` 唯一构造，记 7 个键：`prompt/n/size/quality/seed/ref_count/model_id`；
-  `model_id` 供一键重试复原到具体模型。MJ U/V 用 `build_mj_action_request_json`
+- `request_json` 由 `build_request_json` 唯一构造，记 8 个键：`prompt/n/size/quality/seed/ref_count/ref_paths/model_id`；
+  `model_id` 供一键重试复原到具体模型，`ref_paths` 是参考图快照的相对路径（不在库里塞 base64）。
+  MJ U/V 用 `build_mj_action_request_json`
   （`action` + `mj_task_id`，无 prompt → 前端不给重试入口）。
   `task_list` 的解析抽成 `parse_request_json`，对旧数据与坏 JSON 做兼容。
 - 旧库没有 REFERENCES，迁移由 `storage::migrate_foreign_keys` 重建表完成
@@ -435,9 +443,12 @@ xiic-image-studio/
 - **种子扫描的可用面**：只有能力表 `seed=true` 的协议（openai_chat_image / gemini_native）
   能用；openai_images 规范里没有 seed 字段，能力表 `seed=false`，扫描会被明确拒绝。
   也就是说在 gpt-image / dall-e 这类模型上扫描不可用——这是上游限制，不是实现缺口。
-- **画廊并排对比 / 批量收藏淘汰**：未做。画廊目前只有收藏与搜索两种筛选。
-- **批量导出图片本体 / 工作区备份**：未做。`export` 只导出记录（含原图绝对路径），
-  不打包图片文件，也不导出数据库与供应商配置。
+- **画廊并排对比 / 批量收藏淘汰**：已做。画廊「批量」按钮进入选择模式，可全选、并排对比、
+  批量收藏 / 取消收藏 / 删除（淘汰）；单张右键菜单保持不变。
+- **批量导出图片本体 / 工作区备份**：已做。画廊「打包导出」把当前筛选下的图片本体、
+  JSONL 记录、数据库一致性快照（`VACUUM INTO`）和供应商配置打成 zip。
+  **API Key 不导出**：`providers.json` 只有连接信息，数据库里的密文换机器解不开，
+  manifest 里写明需在目标机器重填 Key。CLI `export` 仍只导 JSONL 记录。
 - **批量开关与蒙版涂抹的 GUI 手工验证**：底层纯函数与单测已覆盖（提交语义、蒙版几何换算），
   但 UI 接线还没有人工点过一遍（见 `docs/superpowers/plans/2026-10-31-p0-3-p0-5-fixes.md` 里
   仍未勾选的两步）。
@@ -445,11 +456,21 @@ xiic-image-studio/
   `refs=false` 的端点；CLI 仍先显式报错再走裁剪）；`tools_file_b64` 改为复用
   `generate::read_file_b64`，带 `canonicalize()` + 目录越界校验，只认 `app_data/images/tools`
   内的工具箱输出，不再能读任意路径。
-- **画廊行解析容忍 NULL**：`width`/`height`/`size`/`thumb_path` 四列可空，
+- **画廊行解析容忍 NULL**：`width`/`height`/`size`/`thumb_path`/`params_json` 五列可能为空，
   原实现按 `i64` / `String` 直接取，NULL 会让整行报错、再被 `filter_map(|r| r.ok())`
-  静默丢掉——缺尺寸的历史图会在画廊里凭空消失。现在缺值按 0 / 空串处理。
-- **前端无 ESLint / Prettier 配置**：目前靠 TypeScript strict + `noUnusedLocals` +
-  `node --test` 兜底；`react-hooks/exhaustive-deps` 一类规则还没纳入检查。
+  静默丢掉——缺尺寸或参数的历史图会在画廊里凭空消失。现在缺值按 0 / 空串 / `{}` 处理。
+- **参考图快照回收**：删任务时按 `request_json.ref_paths` 删掉该任务独占的
+  `images/.refs/<uuid>/`；启动时再扫一遍无任务引用的孤儿目录（跳过 10 分钟内新建的，
+  避免误删并发 CLI 正在写的快照）。图片本体不受影响。
+- **画廊预览与缓存**：预览记图片 **id** 而非数组下标（轮询换掉 items 后不会跳到另一张图，
+  图被删则自动关闭）；原图单独走 6 张上限的 LRU，缩略图按列表长度缓存，
+  换机器前那种「看一张留一份原图」的内存增长没有了。
+- **弹窗统一**：删除确认走 Tauri `ask`（需 `dialog:allow-ask`，`dialog:default` 不含它），
+  命名输入走 `src/ui/PromptDialog.tsx`；不再用浏览器原生 `confirm` / `prompt`
+  （暗色主题下是系统白框，按钮文案也不受控）。
+- **前端静态防线**：已接入 `eslint-plugin-react-hooks`，`rules-of-hooks: error` +
+  `exhaustive-deps: warn` 并进 `npm test`，专门拦「早退 return 之后还有 hook」这类白屏回归。
+  只显式挂 parser、不引 recommended 全套，避免无关的 any / 未用变量报错冲淡信号。未接 Prettier。
 - **未做运行时冒烟**：GUI（提交→DB `session_id`、删会话置 NULL、重试保留 seed、MJ U/V 进度、
   dev 控制台 CSP）与 CLI（`cargo build --release` 后出图、GUI 3s 轮询发现、DB 为 NULL）
   两轮人工验收仍需执行。

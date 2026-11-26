@@ -16,6 +16,7 @@
     "core:window:allow-is-fullscreen",
     "opener:default",
     "dialog:default",
+    "dialog:allow-ask",
     "clipboard-manager:allow-write-image"
   ]
 }

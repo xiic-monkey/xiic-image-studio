@@ -20,6 +20,10 @@ pub struct GalleryItem {
     pub size: i64,
     pub params: serde_json::Value,
     pub created_at: String,
+    /// 来源任务记的供应商/模型 id，供画廊「存为配方」复原模型选择。
+    /// 历史图或 MJ 变换图没有任务归属时为 null。
+    pub provider_id: Option<String>,
+    pub model_id: Option<String>,
 }
 
 /// 画廊筛选条件。列表与导出走同一套条件，导出的才是「你正在看的那批图」。
@@ -48,7 +52,10 @@ pub struct ExportRow {
 }
 
 fn row_to_item(row: &rusqlite::Row) -> rusqlite::Result<GalleryItem> {
-    let params_json: String = row.get(9)?;
+    // params_json 声明了 NOT NULL，但历史库/手工导入可能是 NULL。
+    // 按 String 直接取会整行报错，被上层 filter_map 吞掉，图就凭空消失。
+    let params_json: Option<String> = row.get(9)?;
+    let params_json = params_json.unwrap_or_default();
     // width/height/size 三列可空。按 i64 直接取遇 NULL 会整行报错，
     // 而上层 filter_map(|r| r.ok()) 会把错误行静默丢掉——历史数据缺这三列时
     // 图就凭空消失。缺值按 0 处理，图照样能显示。
@@ -64,8 +71,14 @@ fn row_to_item(row: &rusqlite::Row) -> rusqlite::Result<GalleryItem> {
         width: num(6),
         height: num(7),
         size: num(8),
-        params: serde_json::from_str(&params_json).unwrap_or_default(),
+        params: serde_json::from_str(&params_json).unwrap_or_else(|_| serde_json::json!({})),
         created_at: row.get(10)?,
+        provider_id: row.get::<_, Option<String>>(11)?,
+        // model_id 存在任务的 request_json 里，不是独立列，取出时顺手解析
+        model_id: row
+            .get::<_, Option<String>>(12)?
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.get("model_id").and_then(|m| m.as_str()).map(str::to_string)),
     })
 }
 
@@ -75,22 +88,23 @@ pub fn query_images(
     filter: &GalleryFilter,
 ) -> AppResult<Vec<GalleryItem>> {
     let mut sql = String::from(
-        "SELECT id, path, thumb_path, prompt, model, favorite, width, height, size, params_json, created_at FROM images WHERE 1=1",
+        "SELECT i.id, i.path, i.thumb_path, i.prompt, i.model, i.favorite, i.width, i.height, i.size, i.params_json, i.created_at, t.provider_id, t.request_json \
+         FROM images i LEFT JOIN tasks t ON i.task_id = t.id WHERE 1=1",
     );
     let mut args: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     if let Some(qv) = filter.q.as_ref().filter(|s| !s.trim().is_empty()) {
-        sql.push_str(&format!(" AND prompt LIKE ?{}", args.len() + 1));
+        sql.push_str(&format!(" AND i.prompt LIKE ?{}", args.len() + 1));
         args.push(Box::new(format!("%{}%", qv.trim())));
     }
     if filter.favorite_only {
-        sql.push_str(" AND favorite = 1");
+        sql.push_str(" AND i.favorite = 1");
     }
     if let Some(m) = filter.model.as_ref().filter(|s| !s.is_empty()) {
-        sql.push_str(&format!(" AND model = ?{}", args.len() + 1));
+        sql.push_str(&format!(" AND i.model = ?{}", args.len() + 1));
         args.push(Box::new(m.clone()));
     }
     sql.push_str(&format!(
-        " ORDER BY created_at DESC LIMIT {} OFFSET {}",
+        " ORDER BY i.created_at DESC LIMIT {} OFFSET {}",
         filter.limit.clamp(1, MAX_EXPORT_ROWS),
         filter.offset
     ));
@@ -213,6 +227,169 @@ pub fn gallery_export_jsonl(
     write_jsonl(&path, &rows)
 }
 
+/// 打包导出的结果摘要。
+#[derive(Debug, Clone, Serialize)]
+pub struct BundleSummary {
+    pub images: usize,
+    pub providers: usize,
+    pub bytes: u64,
+}
+
+/// 把当前筛选下的图打包成 zip：图片本体 + JSONL 记录 + 数据库快照 + 供应商配置。
+///
+/// API Key 不导出：`providers.json` 只含连接信息，数据库快照里的 key 是机器绑定密文，
+/// 换机器解不开。manifest 里明确写了这一点，避免用户以为备份能整体迁移。
+#[tauri::command]
+pub fn gallery_export_bundle(
+    db: State<Db>,
+    path: String,
+    q: Option<String>,
+    favorite_only: Option<bool>,
+    model: Option<String>,
+) -> AppResult<BundleSummary> {
+    let filter = GalleryFilter {
+        q,
+        favorite_only: favorite_only.unwrap_or(false),
+        model,
+        limit: MAX_EXPORT_ROWS,
+        offset: 0,
+    };
+    let conn = db.conn();
+    write_bundle(&conn, &path, &filter)
+}
+
+/// 纯逻辑，便于单测：把筛选后的图与配置写成一个 zip。
+pub fn write_bundle(
+    conn: &rusqlite::Connection,
+    path: &str,
+    filter: &GalleryFilter,
+) -> AppResult<BundleSummary> {
+    use zip::write::SimpleFileOptions;
+
+    let p = std::path::Path::new(path);
+    let ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if ext != "zip" {
+        return Err(AppError::General("导出文件必须是 .zip 后缀".into()));
+    }
+    if let Some(parent) = p.parent() {
+        if !parent.as_os_str().is_empty() && !parent.is_dir() {
+            return Err(AppError::General(format!(
+                "目标目录不存在：{}",
+                parent.to_string_lossy()
+            )));
+        }
+    }
+
+    let (items, providers, jsonl) = {
+        let items = query_images(conn, filter)?;
+        let providers = crate::provider::db::list(conn)?;
+        let jsonl = rows_to_jsonl(&export_rows(&items))?;
+        (items, providers, jsonl)
+    };
+
+    let staging = std::env::temp_dir().join(format!("xiic-bundle-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(staging.join("images"))?;
+    std::fs::create_dir_all(staging.join("database"))?;
+    std::fs::write(staging.join("gallery.jsonl"), jsonl)?;
+
+    // 每张图一个子目录，原图 + 缩略图各自带 role 前缀，避免不同任务重名覆盖
+    let mut manifest_images = Vec::new();
+    for (i, it) in items.iter().enumerate() {
+        let mut files = Vec::new();
+        for (role, src) in [("original", &it.path), ("thumb", &it.thumb_path)] {
+            if src.is_empty() || !std::path::Path::new(src).is_file() {
+                continue;
+            }
+            let ext = std::path::Path::new(src)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("png");
+            let name = format!("{:04}-{}.{}", i, role, ext);
+            std::fs::copy(src, staging.join("images").join(&name))?;
+            files.push(serde_json::json!({
+                "role": role,
+                "path": format!("images/{name}"),
+            }));
+        }
+        manifest_images.push(serde_json::json!({
+            "id": it.id,
+            "prompt": it.prompt,
+            "files": files,
+        }));
+    }
+
+    // VACUUM INTO 生成一致性快照：直接复制 .db 可能漏掉 WAL 里还没 checkpoint 的写入。
+    let snapshot = staging.join("database").join("image-studio.db");
+    {
+        conn.execute(
+            "VACUUM INTO ?1",
+            rusqlite::params![snapshot.to_string_lossy().as_ref()],
+        )?;
+    }
+
+    let providers_json = serde_json::to_string_pretty(&providers)
+        .map_err(|e| AppError::General(format!("序列化供应商配置失败：{e}")))?;
+    std::fs::write(staging.join("providers.json"), providers_json)?;
+
+    let manifest = serde_json::json!({
+        "exported_at": chrono::Utc::now().to_rfc3339(),
+        "filter": {
+            "q": filter.q.as_deref(),
+            "favorite_only": filter.favorite_only,
+            "model": filter.model.as_deref(),
+        },
+        "image_count": items.len(),
+        "images": manifest_images,
+        "note": "API Key 未导出（数据库里是机器绑定密文，换机器解不开）。请在目标机器重新填写各供应商的 Key。"
+    });
+    std::fs::write(
+        staging.join("manifest.json"),
+        serde_json::to_string_pretty(&manifest).unwrap_or_default(),
+    )?;
+
+    let file = std::fs::File::create(p)?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    for entry in [
+        "manifest.json",
+        "gallery.jsonl",
+        "providers.json",
+        "database/image-studio.db",
+    ] {
+        let full = staging.join(entry);
+        if !full.is_file() {
+            continue;
+        }
+        zip.start_file(entry, options)?;
+        let mut f = std::fs::File::open(&full)?;
+        std::io::copy(&mut f, &mut zip)?;
+    }
+    let images_dir = staging.join("images");
+    let mut names: Vec<String> = std::fs::read_dir(&images_dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    names.sort();
+    for name in names {
+        zip.start_file(format!("images/{name}"), options)?;
+        let mut f = std::fs::File::open(images_dir.join(&name))?;
+        std::io::copy(&mut f, &mut zip)?;
+    }
+    zip.finish()?;
+
+    let bytes = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    let _ = std::fs::remove_dir_all(&staging);
+    Ok(BundleSummary {
+        images: items.len(),
+        providers: providers.len(),
+        bytes,
+    })
+}
+
 #[tauri::command]
 pub fn image_set_favorite(db: State<Db>, id: String, favorite: bool) -> AppResult<()> {
     let conn = db.conn();
@@ -265,8 +442,8 @@ pub fn image_reveal(app: AppHandle, id: String, db: State<Db>) -> AppResult<()> 
 #[cfg(test)]
 mod tests {
     use super::{
-        export_rows, query_images, rows_to_jsonl, write_jsonl, GalleryFilter, GalleryItem,
-        MAX_EXPORT_ROWS,
+        export_rows, query_images, rows_to_jsonl, write_bundle, write_jsonl, GalleryFilter,
+        GalleryItem, MAX_EXPORT_ROWS,
     };
     use rusqlite::Connection;
 
@@ -283,6 +460,8 @@ mod tests {
             size: 100,
             params,
             created_at: "2026-01-01T00:00:00+00:00".into(),
+            provider_id: None,
+            model_id: None,
         }
     }
 
@@ -302,6 +481,31 @@ mod tests {
             [],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn query_keeps_rows_with_null_params_json() {
+        // 独立建表模拟历史库：params_json 为 NULL 时不能整行消失。
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE images (id TEXT, path TEXT, thumb_path TEXT, prompt TEXT, model TEXT,
+                                  favorite INTEGER, width INTEGER, height INTEGER, size INTEGER,
+                                  params_json TEXT, created_at TEXT, task_id TEXT);
+             CREATE TABLE tasks (id TEXT, provider_id TEXT, request_json TEXT);
+             INSERT INTO images VALUES ('i1','/tmp/a.png',NULL,'旧图','m',0,1024,1024,10,NULL,'2026-01-01T00:00:00+00:00',NULL);",
+        )
+        .unwrap();
+        let all = query_images(
+            &conn,
+            &GalleryFilter {
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(all.len(), 1, "params_json 为 NULL 的历史行不能被静默丢掉");
+        assert_eq!(all[0].prompt, "旧图");
+        assert_eq!(all[0].params, serde_json::json!({}));
     }
 
     #[test]
@@ -411,6 +615,78 @@ mod tests {
     }
 
     #[test]
+    fn bundle_contains_records_image_db_and_providers_without_key() {
+        use std::io::Read;
+
+        let dir = std::env::temp_dir().join(format!("xiic-bundle-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("a.png");
+        std::fs::write(&img, b"fake-png").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::storage::init(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO providers (id, name, base_url, protocol, api_key, created_at, updated_at)
+             VALUES ('p1','P','https://x','openai_images','enc:v1:secret','now','now')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO images (id, path, prompt, model, created_at)
+             VALUES ('i1', ?1, '猫', 'gpt-image-1', 'now')",
+            rusqlite::params![img.to_string_lossy().as_ref()],
+        )
+        .unwrap();
+
+        let zip_path = dir.join("out.zip");
+        let summary = write_bundle(
+            &conn,
+            zip_path.to_str().unwrap(),
+            &GalleryFilter {
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(summary.images, 1);
+        assert_eq!(summary.providers, 1);
+
+        let file = std::fs::File::open(&zip_path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .collect();
+        for required in [
+            "manifest.json",
+            "gallery.jsonl",
+            "providers.json",
+            "database/image-studio.db",
+        ] {
+            assert!(names.contains(&required.to_string()), "缺少 {required}：{names:?}");
+        }
+        assert!(names.iter().any(|n| n.starts_with("images/")), "图片没进包：{names:?}");
+        assert!(names.iter().all(|n| !n.ends_with("refs")), "不该把参考图快照打包");
+
+        let mut manifest = String::new();
+        archive
+            .by_name("manifest.json")
+            .unwrap()
+            .read_to_string(&mut manifest)
+            .unwrap();
+        assert!(manifest.contains("API Key 未导出"));
+
+        let mut providers = String::new();
+        archive
+            .by_name("providers.json")
+            .unwrap()
+            .read_to_string(&mut providers)
+            .unwrap();
+        assert!(!providers.contains("enc:v1:secret"), "供应商配置里的 key 不能导出");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn export_limit_is_capped() {
         let conn = Connection::open_in_memory().unwrap();
         seed_db(&conn);
@@ -423,6 +699,35 @@ mod tests {
         )
         .unwrap();
         assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn query_carries_provider_and_model_id_from_parent_task() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::storage::init(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, provider_id, protocol, request_json, status, total, created_at)
+             VALUES ('t-preset','p-1','openai_images','{\"prompt\":\"猫\",\"model_id\":\"m-1\"}','completed',1,'now')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO images (id, task_id, path, prompt, model, created_at)
+             VALUES ('i-preset','t-preset','/tmp/p.png','猫','gpt-image-1','now')",
+            [],
+        )
+        .unwrap();
+        let items = query_images(
+            &conn,
+            &GalleryFilter {
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].provider_id.as_deref(), Some("p-1"));
+        assert_eq!(items[0].model_id.as_deref(), Some("m-1"));
     }
 
     #[test]

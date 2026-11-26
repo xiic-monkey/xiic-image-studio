@@ -55,6 +55,12 @@ impl From<std::io::Error> for AppError {
     }
 }
 
+impl From<zip::result::ZipError> for AppError {
+    fn from(e: zip::result::ZipError) -> Self {
+        AppError::General(format!("打包失败：{e}"))
+    }
+}
+
 impl From<reqwest::Error> for AppError {
     fn from(e: reqwest::Error) -> Self {
         // 超时单独成类：生成请求超时往往意味着上游仍在出图，

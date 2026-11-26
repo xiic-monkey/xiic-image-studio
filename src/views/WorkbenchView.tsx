@@ -16,7 +16,7 @@ import { useAssets } from "../stores/assets";
 import { useModels } from "../stores/models";
 import { usePrefill } from "../stores/prefill";
 import { useProviders } from "../stores/providers";
-import { useToast } from "../stores/toast";
+import { useToast, type ToastKind } from "../stores/toast";
 import { PROTOCOL_LABELS, type ImageMeta, type PresetItem, type RefImage, type TaskView } from "../types";
 import MaskEditorLayer from "./workbench/MaskEditorLayer";
 import ParamRow from "./workbench/ParamRow";
@@ -30,7 +30,7 @@ import TemplatePanel, { type TemplateApplyPayload } from "./workbench/TemplatePa
 export default function WorkbenchView() {
   const showToast = useToast((s) => s.show);
   // useSubmissions 里的 setNotice(null) 是清旧提示；toast 自动消失，空值直接忽略
-  const setNotice = (msg: string | null) => { if (msg) showToast(msg); };
+  const setNotice = (msg: string | null, kind?: ToastKind) => { if (msg) showToast(msg, kind); };
   const { providers, load } = useProviders();
   const { models, load: loadModels } = useModels();
   const { tasks, imgUrls, upsert, cancel, remove } = useTaskFeed();
@@ -74,7 +74,7 @@ export default function WorkbenchView() {
   };
   const copyImage = useCopyImage(setNotice);
   const revealTaskImage = (img: ImageMeta) => {
-    void api.imageReveal(img.id).catch((e) => setNotice(errorMessage(e)));
+    void api.imageReveal(img.id).catch((e) => setNotice(errorMessage(e), "error"));
   };
   // 与画廊一致：先加参考图，满 4 张时不动提示词；没图片的任务仍可只回填参数继续生成
   const continueTask = async (t: TaskView) => {
@@ -163,6 +163,7 @@ export default function WorkbenchView() {
     setTplOpen(false);
     setNotice(
       `已插入模板「${payload.title}」${size ? `，尺寸 ${size}` : ""}`,
+      "success",
     );
   };
 
@@ -180,7 +181,7 @@ export default function WorkbenchView() {
       modelId: p.model_id ?? "",
     }));
     setPresetOpen(false);
-    setNotice(`已套用配方「${p.name}」`);
+    setNotice(`已套用配方「${p.name}」`, "success");
   };
 
   return (

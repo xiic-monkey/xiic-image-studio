@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { api } from "../../ipc";
 import { errorMessage } from "../../lib/error";
 import { btnCompactCls, inputCompactCls } from "../../ui/controls";
+import { confirmDelete } from "../../ui/dialogs";
+import type { Notify } from "../../stores/toast";
 import type { PresetItem } from "../../types";
 
 interface Props {
@@ -9,7 +11,7 @@ interface Props {
   onApply: (p: PresetItem) => void;
   /** 当前表单快照，用来「存为配方」时预填。 */
   current: { prompt: string; size: string; quality: string; seed: string; providerId: string; modelId: string };
-  onNotice: (msg: string) => void;
+  onNotice: Notify;
 }
 
 /**
@@ -28,11 +30,11 @@ export default function PresetPanel({ onApply, current, onNotice }: Props) {
   const save = async () => {
     const n = name.trim();
     if (!n) {
-      onNotice("给配方起个名字");
+      onNotice("给配方起个名字", "warning");
       return;
     }
     if (!current.prompt.trim()) {
-      onNotice("当前没有提示词，没法存配方");
+      onNotice("当前没有提示词，没法存配方", "warning");
       return;
     }
     try {
@@ -47,19 +49,19 @@ export default function PresetPanel({ onApply, current, onNotice }: Props) {
       });
       setName("");
       await reload();
-      onNotice(`已保存配方「${n}」`);
+      onNotice(`已保存配方「${n}」`, "success");
     } catch (err) {
-      onNotice(errorMessage(err));
+      onNotice(errorMessage(err), "error");
     }
   };
 
   const remove = async (p: PresetItem) => {
-    if (!confirm(`删除配方「${p.name}」？`)) return;
+    if (!(await confirmDelete(`删除配方「${p.name}」？`))) return;
     try {
       await api.presetDelete(p.id);
       await reload();
     } catch (err) {
-      onNotice(errorMessage(err));
+      onNotice(errorMessage(err), "error");
     }
   };
 

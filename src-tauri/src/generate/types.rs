@@ -57,7 +57,7 @@ pub fn clamp_n(n: u32, max: u32) -> u32 {
 
 /// 三处入口唯一的 request_json 构造。只记「实际发出的参数」，
 /// 一键重试靠这些字段复现；额外键只会随版本漂移且无人读取。
-pub fn build_request_json(req: &GenerateRequest, n: u32) -> String {
+pub fn build_request_json(req: &GenerateRequest, n: u32, ref_paths: &[String]) -> String {
     json!({
         "prompt": req.prompt.trim(),
         "n": n,
@@ -65,6 +65,8 @@ pub fn build_request_json(req: &GenerateRequest, n: u32) -> String {
         "quality": req.quality,
         "seed": req.seed,
         "ref_count": req.refs.len(),
+        // 参考图快照的相对路径（相对 images 根）。旧任务没有这个键，仍按 ref_count>0 无图重试处理。
+        "ref_paths": ref_paths,
         "model_id": req.model_id,
     })
     .to_string()
@@ -135,9 +137,10 @@ pub struct TaskItem {
     pub quality: Option<String>,
     pub n: u32,
     pub seed: Option<u64>,
-    /// 参考图数量。>0 说明是图生图：我们没存参考图本体，重试会退化成文生图，
-    /// 前端据此不提供重试入口，避免"看着一样、结果不一样"的误导。
+    /// 参考图数量；配合 ref_paths 判断重试能否复现原图。
     pub ref_count: u64,
+    /// 参考图快照路径（相对 images 根）。旧任务的图生图没有这个键 → 重试时拿不到图。
+    pub ref_paths: Vec<String>,
     /// 该任务已生成的图片：刷新窗口后靠它回填缩略图
     /// （实时进度只推送"新生成"的图，历史任务没有这条就永远没缩略图）
     pub images: Vec<ImageMeta>,
@@ -233,13 +236,16 @@ mod tests {
 
     #[test]
     fn build_request_json_keeps_only_retryable_fields() {
-        let v: serde_json::Value = serde_json::from_str(&build_request_json(&req(), 3)).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&build_request_json(&req(), 3, &[".refs/x/0.png".into()]))
+                .unwrap();
         assert_eq!(v["prompt"], "cat");
         assert_eq!(v["n"], 3);
         assert_eq!(v["size"], "1024x1024");
         assert_eq!(v["quality"], "high");
         assert_eq!(v["seed"], 42);
         assert_eq!(v["ref_count"], 1);
+        assert_eq!(v["ref_paths"][0], ".refs/x/0.png");
         assert_eq!(v["model_id"], "m-1");
         assert!(
             v.get("session_id").is_none(),

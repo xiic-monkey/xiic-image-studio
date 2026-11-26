@@ -61,6 +61,117 @@ pub(crate) fn images_dir(app: &AppHandle) -> AppResult<PathBuf> {
         .join("images"))
 }
 
+/// 把参考图快照落盘到 `images/.refs/<uuid>/`，返回相对 images 根的路径列表。
+/// request_json 只记这些短路径，不塞 base64——否则 task_list 每次要把几十 MB
+/// 图片数据读进内存，任务面板会卡死。重试时按这些路径读回原图复现图生图。
+pub fn persist_refs(images_root: &Path, refs: &[RefImage]) -> AppResult<Vec<String>> {
+    if refs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let dir = images_root.join(".refs").join(&id);
+    std::fs::create_dir_all(&dir)?;
+    let mut paths = Vec::with_capacity(refs.len());
+    for (i, r) in refs.iter().enumerate() {
+        let ext = match r.mime.as_str() {
+            "image/jpeg" => "jpg",
+            "image/webp" => "webp",
+            "image/gif" => "gif",
+            _ => "png",
+        };
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(r.data.as_bytes())
+            .map_err(|e| AppError::General(format!("参考图解码失败：{e}")))?;
+        let name = format!("{i}.{ext}");
+        std::fs::write(dir.join(&name), bytes)?;
+        paths.push(format!(".refs/{id}/{name}"));
+    }
+    Ok(paths)
+}
+
+/// 从 request_json 取参考图快照目录名（`.refs/<uuid>/...` 的首段）。
+/// 只接受单层安全名字，防历史脏数据里的 `../` 把删除带到别处。
+pub fn refs_snapshot_id(request_json: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(request_json).ok()?;
+    for p in v.get("ref_paths")?.as_array()?.iter().filter_map(|x| x.as_str()) {
+        let mut parts = p.split('/');
+        if parts.next() != Some(".refs") {
+            continue;
+        }
+        if let Some(id) = parts.next() {
+            if is_safe_component(id) {
+                return Some(id.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn is_safe_component(s: &str) -> bool {
+    !s.is_empty() && s != "." && s != ".." && !s.contains(['/', '\\'])
+}
+
+/// 删除一条任务独占的参考图快照目录。只删 `.refs/<id>`，不碰 images 下的图。
+pub fn remove_refs_snapshot(images_root: &Path, id: &str) {
+    if !is_safe_component(id) {
+        return;
+    }
+    let _ = std::fs::remove_dir_all(images_root.join(".refs").join(id));
+}
+
+/// 启动时清掉已没有任何任务引用的快照目录。删任务时已按 request_json 清理，
+/// 这里兜住「早于该功能的堆积」和删库残留。
+/// 只在启动期跑：此刻没有在途任务；同时跳过刚写入的目录，避免误删并发 CLI 正在提交的快照。
+pub fn sweep_orphan_refs(images_root: &Path, conn: &rusqlite::Connection) -> AppResult<usize> {
+    sweep_refs(images_root, conn, std::time::Duration::from_secs(600))
+}
+
+fn sweep_refs(
+    images_root: &Path,
+    conn: &rusqlite::Connection,
+    min_age: std::time::Duration,
+) -> AppResult<usize> {
+    let refs_dir = images_root.join(".refs");
+    let entries = match std::fs::read_dir(&refs_dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(0), // 目录不存在 = 从没写过快照
+    };
+    let mut referenced = std::collections::HashSet::new();
+    {
+        let mut stmt = conn.prepare("SELECT request_json FROM tasks")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        for json in rows.flatten() {
+            if let Some(id) = refs_snapshot_id(&json) {
+                referenced.insert(id);
+            }
+        }
+    }
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if !entry.path().is_dir() || referenced.contains(&name) || !is_safe_component(&name) {
+            continue;
+        }
+        // 太新的目录可能是并发进程正在写的快照，留到下次启动再清
+        let too_fresh = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .map(|d| d < min_age)
+            .unwrap_or(false);
+        if too_fresh {
+            continue;
+        }
+        if std::fs::remove_dir_all(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
 fn dispatch_producer<'a>(
     ctx: &'a GenCtx,
     producer: &'a ImageProducer,
@@ -460,11 +571,95 @@ pub fn read_file_b64(images_root: &Path, rel_or_abs: &str) -> AppResult<String> 
 #[cfg(test)]
 mod tests {
     use super::{
-        create_task, dispatch_producer, finish_task_row, insert_image, reclaim_orphan_tasks,
-        NewImage,
+        create_task, dispatch_producer, finish_task_row, insert_image, persist_refs,
+        reclaim_orphan_tasks, refs_snapshot_id, remove_refs_snapshot, sweep_refs, NewImage,
     };
     use crate::error::AppError;
     use rusqlite::{params, Connection};
+
+    #[test]
+    fn refs_snapshot_id_only_accepts_safe_dir() {
+        assert_eq!(
+            refs_snapshot_id(r#"{"ref_paths":[".refs/abc/0.png"]}"#).as_deref(),
+            Some("abc")
+        );
+        assert_eq!(
+            refs_snapshot_id(r#"{"ref_paths":[".refs/../etc/passwd"]}"#),
+            None,
+            "越界路径不能变成删除目标"
+        );
+        assert_eq!(refs_snapshot_id(r#"{"prompt":"x"}"#), None);
+        assert_eq!(refs_snapshot_id("not json"), None);
+    }
+
+    #[test]
+    fn remove_refs_snapshot_deletes_dir_but_not_parent() {
+        let root = std::env::temp_dir().join(format!("xiic-refs-del-{}", uuid::Uuid::new_v4()));
+        let dir = root.join(".refs").join("snap");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("0.png"), b"x").unwrap();
+
+        remove_refs_snapshot(&root, "snap");
+        assert!(!dir.exists(), "任务删了，快照目录也该没了");
+        assert!(root.join(".refs").exists(), "不能连 .refs 根一起删");
+
+        // 越界名字直接忽略，不能删到 images 根
+        remove_refs_snapshot(&root, "..");
+        assert!(root.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sweep_refs_removes_orphans_and_keeps_referenced() {
+        let root = std::env::temp_dir().join(format!("xiic-refs-sweep-{}", uuid::Uuid::new_v4()));
+        let refs = root.join(".refs");
+        std::fs::create_dir_all(refs.join("keep")).unwrap();
+        std::fs::create_dir_all(refs.join("gone")).unwrap();
+        std::fs::write(refs.join("keep").join("0.png"), b"x").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE tasks (request_json TEXT)")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO tasks VALUES (?1)",
+            params![r#"{"ref_paths":[".refs/keep/0.png"]}"#],
+        )
+        .unwrap();
+
+        let n = sweep_refs(&root, &conn, std::time::Duration::ZERO).unwrap();
+        assert_eq!(n, 1);
+        assert!(refs.join("keep").exists(), "仍被任务引用的快照不能删");
+        assert!(!refs.join("gone").exists(), "无人引用的快照应被清理");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn persist_refs_writes_snapshot_and_returns_relative_paths() {
+        use base64::Engine;
+        use crate::generate::types::RefImage;
+
+        let root = std::env::temp_dir().join(format!("xiic-refs-{}", uuid::Uuid::new_v4()));
+        let refs = vec![
+            RefImage {
+                name: "a.png".into(),
+                mime: "image/png".into(),
+                data: base64::engine::general_purpose::STANDARD.encode(b"png-bytes"),
+            },
+            RefImage {
+                name: "b.jpg".into(),
+                mime: "image/jpeg".into(),
+                data: base64::engine::general_purpose::STANDARD.encode(b"jpg-bytes"),
+            },
+        ];
+        let paths = persist_refs(&root, &refs).unwrap();
+        assert_eq!(paths.len(), 2);
+        assert!(paths[0].starts_with(".refs/"), "路径必须相对 images 根：{:?}", paths);
+        assert!(paths[0].ends_with(".png"));
+        assert!(paths[1].ends_with(".jpg"));
+        assert_eq!(std::fs::read(root.join(&paths[0])).unwrap(), b"png-bytes");
+        assert_eq!(std::fs::read(root.join(&paths[1])).unwrap(), b"jpg-bytes");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// 端到端：建供应商（带 Key）→ 自动建模型并关联 → 解析模型 → 按能力裁剪请求 →
     /// 构造上下文 → 按协议分发 → 真拿到一张图。

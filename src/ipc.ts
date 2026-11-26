@@ -30,6 +30,8 @@ export const api = {
   generateCancel: (taskId: string) => invoke<void>("generate_cancel", { taskId }),
   taskList: (limit?: number) => invoke<TaskItem[]>("task_list", { limit }),
   taskDelete: (id: string) => invoke<void>("task_delete", { id }),
+  /** 读回任务保存的参考图快照（data URL 列表），供重试复现图生图 */
+  taskRefDataUrls: (taskId: string) => invoke<string[]>("task_ref_data_urls", { taskId }),
   imageReadB64: (path: string) => invoke<string>("image_read_b64", { path }),
   imageCopy: (path: string) => invoke<void>("image_copy", { path }),
   imageList: (opts?: { q?: string; favoriteOnly?: boolean; model?: string; limit?: number; offset?: number }) =>
@@ -50,6 +52,14 @@ export const api = {
       favoriteOnly: opts?.favoriteOnly ?? null,
       model: opts?.model ?? null,
       limit: opts?.limit ?? null,
+    }),
+  /** 打包导出：图片本体 + JSONL + 数据库快照 + 供应商配置（不含 API Key） */
+  galleryExportBundle: (path: string, opts?: { q?: string; favoriteOnly?: boolean; model?: string }) =>
+    invoke<{ images: number; providers: number; bytes: number }>("gallery_export_bundle", {
+      path,
+      q: opts?.q ?? null,
+      favoriteOnly: opts?.favoriteOnly ?? null,
+      model: opts?.model ?? null,
     }),
   promptList: () => invoke<PromptItem[]>("prompt_list"),
   promptSave: (prompt: { id?: string; title: string; content: string; tags?: string[] }) =>

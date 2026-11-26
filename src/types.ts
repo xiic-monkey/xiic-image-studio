@@ -152,6 +152,8 @@ export interface TaskItem {
   seed?: number | null;
   /** 参考图数量：>0 表示图生图，重试会缺参考图（前端据此隐藏重试入口） */
   ref_count?: number;
+  /** 参考图快照路径（相对 images 根）；旧任务的图生图没有这个键 */
+  ref_paths?: string[];
   /** 会话归属；CLI 任务与旧数据为 null */
   session_id?: string | null;
   /** 该任务使用的模型 id（重试时据此复原模型） */
@@ -178,6 +180,8 @@ export interface TaskView {
   quality: string | null;
   n: number;
   refCount: number;
+  /** 参考图快照路径；非空表示重试能复现原图生图 */
+  refPaths: string[];
   /** 随机种子；旧数据为 null */
   seed: number | null;
   /** 会话归属；CLI 任务与旧数据为 null，重试时回落到当前会话 */
@@ -204,6 +208,9 @@ export interface GalleryItem {
   size: number;
   params: { size?: string; quality?: string; seed?: number; mj_task_id?: string };
   created_at: string;
+  /** 来源任务记的供应商/模型 id，供「存为配方」复原模型选择 */
+  provider_id?: string | null;
+  model_id?: string | null;
 }
 
 export interface PromptItem {

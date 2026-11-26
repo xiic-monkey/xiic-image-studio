@@ -337,7 +337,9 @@ fn generate(args: &[String]) -> Result<()> {
         &resolved.model_name,
         resolved.capabilities.clone(),
     );
-    let request_json = build_request_json(&req, n);
+    // 与 GUI 一样把参考图落盘，CLI 生成的图生图任务也能在 GUI 里重试复现
+    let ref_paths = crate::generate::persist_refs(&images_dir, &req.refs)?;
+    let request_json = build_request_json(&req, n, &ref_paths);
     let task = {
         let conn = db.conn();
         let spec = pipeline::TaskSpec {

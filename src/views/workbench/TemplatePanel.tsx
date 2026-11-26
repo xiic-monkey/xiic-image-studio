@@ -7,6 +7,7 @@ import {
   type PromptTemplate,
 } from "../../lib/template";
 import { TEMPLATE_CATEGORIES, TEMPLATE_LIBRARY } from "../../templates";
+import type { Notify } from "../../stores/toast";
 import { btnChipCls, btnCls, btnCompactCls, btnGhostCls, btnPrimaryCls, btnRowCls, inputCompactCls, labelCls, textareaCls } from "../../ui/controls";
 
 export interface TemplateApplyPayload {
@@ -20,7 +21,7 @@ export interface TemplateApplyPayload {
 interface Props {
   onApply: (payload: TemplateApplyPayload) => void;
   onClose: () => void;
-  onNotice?: (message: string) => void;
+  onNotice?: Notify;
 }
 
 /** 各分类的模板数，静态数据，模块加载时算一次。 */
@@ -104,7 +105,7 @@ export default function TemplatePanel({ onApply, onClose, onNotice }: Props) {
 
   const copy = async () => {
     await navigator.clipboard.writeText(composed.prompt);
-    onNotice?.("提示词已复制");
+    onNotice?.("提示词已复制", "success");
   };
 
   const saveToLibrary = async () => {
@@ -114,7 +115,7 @@ export default function TemplatePanel({ onApply, onClose, onNotice }: Props) {
       content: composed.prompt,
       tags: [active.category],
     });
-    onNotice?.(`已存入提示词库：${active.title}`);
+    onNotice?.(`已存入提示词库：${active.title}`, "success");
   };
 
   return (

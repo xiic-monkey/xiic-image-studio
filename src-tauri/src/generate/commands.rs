@@ -47,6 +47,12 @@ pub fn submit_task(app: &AppHandle, mut request: GenerateRequest) -> AppResult<S
     };
     crate::capabilities::sanitize(&resolved.capabilities, &mut request);
 
+    // 参考图落盘：sanitize 之后才是真正会发给上游的图，request_json 只记短路径。
+    // 这样重试能复现图生图，又不会把 base64 塞进 task_list 的每次查询里。
+    let ref_paths = {
+        let images_root = generate::images_dir(app)?;
+        generate::persist_refs(&images_root, &request.refs)?
+    };
     let ctx = pipeline::build_ctx(
         &provider,
         key,
@@ -55,7 +61,7 @@ pub fn submit_task(app: &AppHandle, mut request: GenerateRequest) -> AppResult<S
         &resolved.model_name,
         resolved.capabilities.clone(),
     );
-    let request_json = build_request_json(&request, n);
+    let request_json = build_request_json(&request, n, &ref_paths);
     let task = {
         let conn = db.conn();
         let spec = pipeline::TaskSpec {
@@ -92,6 +98,7 @@ struct ParsedTaskRequest {
     n: u32,
     seed: Option<u64>,
     ref_count: u64,
+    ref_paths: Vec<String>,
     model_id: Option<String>,
 }
 
@@ -105,6 +112,11 @@ fn parse_request_json(s: &str) -> ParsedTaskRequest {
         n: req.get("n").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
         seed: req.get("seed").and_then(|v| v.as_u64()),
         ref_count: req.get("ref_count").and_then(|v| v.as_u64()).unwrap_or(0),
+        ref_paths: req
+            .get("ref_paths")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .unwrap_or_default(),
         model_id: str_of("model_id"),
     }
 }
@@ -141,6 +153,7 @@ pub fn task_list(db: State<Db>, limit: Option<u32>) -> AppResult<Vec<TaskItem>> 
                 n: parsed.n,
                 seed: parsed.seed,
                 ref_count: parsed.ref_count,
+                ref_paths: parsed.ref_paths,
                 images: Vec::new(),
                 session_id: r.get::<_, Option<String>>(9)?,
                 model_id: parsed.model_id,
@@ -206,10 +219,30 @@ pub fn task_list(db: State<Db>, limit: Option<u32>) -> AppResult<Vec<TaskItem>> 
 /// 从任务队列删除一条任务记录（仅删 tasks 表，不影响已生成的图片/gallery）。
 /// 图片仍在画廊里，但 `images.task_id` 会被外键置空（ON DELETE SET NULL）——
 /// 不再声称自己属于这个已删的任务。
+/// 参考图快照是这条任务独占的临时文件：任务删了重试入口也没了，一并清掉。
 #[tauri::command]
-pub fn task_delete(db: State<Db>, id: String) -> AppResult<()> {
-    let conn = db.conn();
-    conn.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
+pub fn task_delete(app: AppHandle, db: State<Db>, id: String) -> AppResult<()> {
+    let req_json: Option<String> = {
+        let conn = db.conn();
+        let req = conn
+            .query_row(
+                "SELECT request_json FROM tasks WHERE id = ?1",
+                params![id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        conn.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
+        req
+    };
+    // 图片本体不在这里删（仍在画廊），只清 `.refs/<uuid>` 快照目录
+    if let Some(json) = req_json {
+        if let Some(snap) = generate::refs_snapshot_id(&json) {
+            if let Ok(root) = generate::images_dir(&app) {
+                generate::remove_refs_snapshot(&root, &snap);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -325,6 +358,39 @@ pub fn image_read_b64(app: AppHandle, path: String) -> AppResult<String> {
     generate::read_file_b64(&root, &path)
 }
 
+/// 读取某个任务保存的参考图快照（data URL 列表），供重试复现图生图。
+/// 只从 request_json 记的 .refs/ 相对路径读，路径越界由 read_file_b64 兜底。
+#[tauri::command]
+pub fn task_ref_data_urls(
+    app: AppHandle,
+    db: State<Db>,
+    task_id: String,
+) -> AppResult<Vec<String>> {
+    let req_json: String = {
+        let conn = db.conn();
+        conn.query_row(
+            "SELECT request_json FROM tasks WHERE id = ?1",
+            params![task_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| AppError::General("任务不存在".into()))?
+    };
+    let paths = parse_request_json(&req_json).ref_paths;
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let root = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| AppError::General(e.to_string()))?
+        .join("images");
+    paths
+        .iter()
+        .map(|p| generate::read_file_b64(&root, p))
+        .collect()
+}
+
 /// 把图片复制到系统剪贴板。解码在后端完成，前端只传一个路径——
 /// 否则要把整张图的 base64 传到前端、解码成 RGBA 再传回来，两次大块 IPC 会明显卡顿。
 #[tauri::command]
@@ -369,6 +435,16 @@ mod tests {
         assert_eq!(p.quality.as_deref(), Some("high"));
         assert_eq!(p.seed, Some(42));
         assert_eq!(p.ref_count, 0);
+        assert!(p.ref_paths.is_empty());
+    }
+
+    #[test]
+    fn parse_request_json_reads_ref_paths_for_retry() {
+        let p = parse_request_json(
+            r#"{"prompt":"cat","n":1,"ref_count":2,"ref_paths":[".refs/a/0.png",".refs/a/1.webp"]}"#,
+        );
+        assert_eq!(p.ref_paths.len(), 2);
+        assert_eq!(p.ref_paths[1], ".refs/a/1.webp");
     }
 
     #[test]

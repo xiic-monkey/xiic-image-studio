@@ -16,9 +16,13 @@ mod sessions;
 pub mod storage;
 
 use crate::error::AppResult;
-use gallery::{gallery_export_jsonl, image_delete, image_list, image_reveal, image_set_favorite};
+use gallery::{
+    gallery_export_bundle, gallery_export_jsonl, image_delete, image_list, image_reveal,
+    image_set_favorite,
+};
 use generate::commands::{
-    generate_cancel, generate_submit, image_copy, image_read_b64, mj_action, task_delete, task_list,
+    generate_cancel, generate_submit, image_copy, image_read_b64, mj_action, task_delete,
+    task_list, task_ref_data_urls,
 };
 use generate::QueueState;
 use media::{
@@ -84,6 +88,13 @@ pub fn run() {
                 if let Err(e) = generate::reclaim_orphan_tasks(&conn) {
                     eprintln!("[startup] 遗留任务清理失败，任务队列可能仍显示「生成中」：{e}");
                 }
+                // 参考图快照只被任务重试引用，任务删了就该清。删任务时已顺手清理，
+                // 这里兜住功能上线前堆积的孤儿目录。
+                match generate::sweep_orphan_refs(&app_dir.join("images"), &conn) {
+                    Ok(0) => {}
+                    Ok(n) => eprintln!("[startup] 已清理 {n} 个无人引用的参考图快照"),
+                    Err(e) => eprintln!("[startup] 参考图快照清理失败（下次启动会重试）：{e}"),
+                }
                 match provider_db::encrypt_plaintext_keys(&conn) {
                     Ok(0) => {}
                     Ok(n) => eprintln!("[startup] 已把 {n} 个明文 API Key 加密回写"),
@@ -148,6 +159,7 @@ pub fn run() {
             generate_cancel,
             task_list,
             task_delete,
+            task_ref_data_urls,
             image_read_b64,
             image_copy,
             image_list,
@@ -155,6 +167,7 @@ pub fn run() {
             image_delete,
             image_reveal,
             gallery_export_jsonl,
+            gallery_export_bundle,
             prompt_list,
             prompt_save,
             prompt_delete,

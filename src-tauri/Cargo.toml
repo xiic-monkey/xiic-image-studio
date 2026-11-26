@@ -28,6 +28,8 @@ serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["sync", "time", "fs", "process", "macros", "rt-multi-thread"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+# 画廊打包导出：图片本体 + 记录 + 数据库快照 + 供应商配置
+zip = "2"
 # 无头 CLI 模式自己定位应用数据目录
 dirs = "5"
 # API key 加密存储（AES-256-GCM + 机器绑定密钥派生）

@@ -9,6 +9,7 @@ import {
   inputCls,
   textareaCls,
 } from "../ui/controls";
+import { confirmDelete } from "../ui/dialogs";
 import type { PromptItem } from "../types";
 
 export default function PromptsView() {
@@ -59,7 +60,7 @@ export default function PromptsView() {
                 <button className={btnRowCls}
                   onClick={() => setEditing({ id: p.id, title: p.title, content: p.content })}>编辑</button>
                 <button className={btnRowDangerCls}
-                  onClick={async () => { if (confirm("删除该提示词？")) { await api.promptDelete(p.id); reload(); } }}>删除</button>
+                  onClick={async () => { if (await confirmDelete("删除该提示词？")) { await api.promptDelete(p.id); reload(); } }}>删除</button>
               </div>
             </div>
             <p className="mt-1 line-clamp-2 text-xs text-neutral-500">{p.content}</p>

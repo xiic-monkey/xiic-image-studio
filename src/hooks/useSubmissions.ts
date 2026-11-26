@@ -6,6 +6,7 @@ import { isSeedEnabled } from "../lib/capabilities.ts";
 import type { DraftForm } from "../lib/draft.ts";
 import { errorMessage } from "../lib/error";
 import { buildGenerateRequest } from "../lib/request.ts";
+import { dataUrlToRef } from "../lib/ref-image.ts";
 import { canRetry, retryRequest } from "../lib/retry.ts";
 import {
   buildScanSubmissions,
@@ -14,6 +15,7 @@ import {
   remainingText,
 } from "../lib/submission.ts";
 import type { Capabilities, GenerateRequest, ProviderListItem, RefImage, TaskUpsert, TaskView } from "../types";
+import type { ToastKind } from "../stores/toast";
 
 export interface SubmissionContext {
   providers: ProviderListItem[];
@@ -29,7 +31,7 @@ export interface SubmissionContext {
   upsert: (p: TaskUpsert) => void;
   patch: (p: Partial<DraftForm>) => void;
   clearRefs: () => void;
-  setNotice: (msg: string | null) => void;
+  setNotice: (msg: string | null, kind?: ToastKind) => void;
 }
 
 /** 三条提交路径（生成 / 批量导入 / 一键重试）共用同一个请求组装点与乐观任务卡。 */
@@ -53,6 +55,7 @@ export function useSubmissions(ctx: SubmissionContext) {
       quality: req.quality ?? null,
       n: req.n,
       refCount: req.refs.length,
+      refPaths: [],
       seed: req.seed ?? null,
       sessionId: req.session_id ?? null,
       modelId: req.model_id ?? null,
@@ -68,7 +71,7 @@ export function useSubmissions(ctx: SubmissionContext) {
     }
     const provider = ctx.providers.find((p) => p.id === ctx.providerId);
     if (!provider) {
-      ctx.setNotice("请先在「供应商」页添加并保存供应商");
+      ctx.setNotice("请先在「供应商」页添加并保存供应商", "warning");
       return;
     }
     const { form } = ctx;
@@ -76,14 +79,14 @@ export function useSubmissions(ctx: SubmissionContext) {
     // 扫描模式按能力表判定：模型不支持 seed 时明确拒绝，
     // 不能静默按「无种子」提交一串重复任务（那是白花钱）。
     if (form.scanMode && !isSeedEnabled(caps)) {
-      ctx.setNotice("当前模型不支持种子，无法使用种子扫描");
+      ctx.setNotice("当前模型不支持种子，无法使用种子扫描", "warning");
       return;
     }
     const submissions = form.scanMode
       ? buildScanSubmissions(form.prompt, parseSeedBase(form.seed), form.scanCount)
       : buildSubmissions(form.prompt, form.batchMode, form.count);
     if (submissions.length === 0) {
-      ctx.setNotice("请输入提示词");
+      ctx.setNotice("请输入提示词", "warning");
       return;
     }
     setSubmitting(true);
@@ -132,15 +135,16 @@ export function useSubmissions(ctx: SubmissionContext) {
             : multiline
               ? "已提交 1 个任务（整段文本按一条提示词处理；要每行一个任务请打开「按行批量」）"
               : null,
+          "success",
         );
       } else {
         // 扫描模式下每条任务的提示词都相同，remainingText 会拼出 N 份重复文本。
         // 失败时保留原始提示词即可——重扫一遍比看一堆重复行有用。
         ctx.patch({ prompt: form.scanMode ? form.prompt : remainingText(submissions, submitted) });
-        ctx.setNotice(`已提交 ${submitted}/${submissions.length} 条，第 ${submitted + 1} 条提交失败：${failMsg}`);
+        ctx.setNotice(`已提交 ${submitted}/${submissions.length} 条，第 ${submitted + 1} 条提交失败：${failMsg}`, "warning");
       }
     } catch (e) {
-      ctx.setNotice(errorMessage(e));
+      ctx.setNotice(errorMessage(e), "error");
     } finally {
       setSubmitting(false);
     }
@@ -153,7 +157,7 @@ export function useSubmissions(ctx: SubmissionContext) {
     }
     const provider = ctx.providers.find((p) => p.id === ctx.providerId);
     if (!provider) {
-      ctx.setNotice("请先在「供应商」页添加并保存供应商");
+      ctx.setNotice("请先在「供应商」页添加并保存供应商", "warning");
       return;
     }
     const picked = await open({
@@ -166,7 +170,7 @@ export function useSubmissions(ctx: SubmissionContext) {
       const text = await api.readTextFile(picked);
       const items = parseBatch(text, picked);
       if (items.length === 0) {
-        ctx.setNotice("文件为空或无有效行");
+        ctx.setNotice("文件为空或无有效行", "warning");
         return;
       }
       let ok = 0;
@@ -191,13 +195,13 @@ export function useSubmissions(ctx: SubmissionContext) {
           optimistic(taskId, req, it.prompt);
           ok += 1;
         } catch (e) {
-          ctx.setNotice(`批量提交在第 ${ok + 1} 行失败：${errorMessage(e)}（已提交 ${ok} 条）`);
+          ctx.setNotice(`批量提交在第 ${ok + 1} 行失败：${errorMessage(e)}（已提交 ${ok} 条）`, "error");
           break;
         }
       }
-      if (ok === items.length) ctx.setNotice(`已提交 ${ok} 个批量任务`);
+      if (ok === items.length) ctx.setNotice(`已提交 ${ok} 个批量任务`, "success");
     } catch (e) {
-      ctx.setNotice(`读取/解析失败：${errorMessage(e)}`);
+      ctx.setNotice(`读取/解析失败：${errorMessage(e)}`, "error");
     } finally {
       setSubmitting(false);
     }
@@ -209,19 +213,26 @@ export function useSubmissions(ctx: SubmissionContext) {
       return;
     }
     if (!canRetry(t)) {
-      ctx.setNotice("该任务缺少可重试的参数（供应商或提示词为空）");
+      ctx.setNotice("该任务缺少可重试的参数（供应商或提示词为空）", "warning");
       return;
     }
     try {
-      // 参考图本体没入库，只有 refCount === 0 的任务才会走到这里。
+      // 图生图先把落盘的参考图快照读回来；读不到就明确报错，
+      // 绝不悄悄退化成文生图（那样结果看着像、其实完全不一样）。
+      const dataUrls = t.refCount > 0 ? await api.taskRefDataUrls(t.id) : [];
+      if (t.refCount > 0 && dataUrls.length === 0) {
+        ctx.setNotice("这张图没有保存参考图快照，无法重试", "warning");
+        return;
+      }
+      const refs = dataUrls.map((url, i) => dataUrlToRef(url, `ref-${i + 1}`));
       // 不传 caps：重试要按任务原模型复现参数，由后端用原 modelId 的能力裁剪；
       // 拿当前选中模型的能力会把 size/quality 换成另一张表的值，甚至丢掉 seed。
-      const req = retryRequest(t, ctx.sessionId);
+      const req = retryRequest(t, ctx.sessionId, undefined, refs);
       const taskId = await api.generateSubmit(req);
       optimistic(taskId, req, t.prompt);
-      ctx.setNotice("已按原参数重新提交");
+      ctx.setNotice("已按原参数重新提交", "success");
     } catch (e) {
-      ctx.setNotice(`重试失败：${errorMessage(e)}`);
+      ctx.setNotice(`重试失败：${errorMessage(e)}`, "error");
     }
   };
 
